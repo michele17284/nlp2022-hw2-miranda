@@ -1,7 +1,7 @@
 import json
 
 import numpy as np
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Union
 from typing import List, Dict
 import torch
 import random
@@ -23,7 +23,7 @@ from sklearn.metrics import confusion_matrix
 # import pandas as pd
 import copy
 import torchmetrics
-
+import pytorch_lightning as pl
 # seeds for reproducibility
 torch.manual_seed(42)
 np.random.seed(42)
@@ -185,7 +185,7 @@ class SentenceDataset(Dataset):
         return self.sentences[idx]
 
     # custom dataloader which incorporates the collate function
-    def dataloader(self, batch_size):
+    def dataloader(self, batch_size, shuffle=False):
         return DataLoader(self, batch_size=batch_size, collate_fn=partial(self.collate))
 
     # function to map each lemma,pos in a sentence to their indexes
@@ -209,13 +209,9 @@ class SentenceDataset(Dataset):
             device)  # padding all the pos tags
         y = torch.nn.utils.rnn.pad_sequence(y, batch_first=True, padding_value=self.roles2idx[PAD_TOKEN]).to(
             device)  # padding all the labels
-        return {
-            "X": X,
-            "X_len": X_len,
-            "X_pos": X_pos,
-            "y": y,
-            "ids": ids
-        }
+
+        return X, X_len, X_pos, y, ids
+
 
     # function to convert the output ids to the corresponding labels
     def convert_output(self, output):
@@ -227,6 +223,42 @@ class SentenceDataset(Dataset):
             converted.append(converted_sent)
         return converted
 
+class SentencesDataModule(pl.LightningDataModule):
+
+    def __init__(
+        self,
+        data_train_path: str,
+        data_dev_path: str,
+        data_test_path: str,
+        batch_size: int
+    ) -> None:
+        super().__init__()
+        self.data_train_path = data_train_path
+        self.data_dev_path = data_dev_path
+        self.data_test_path = data_test_path
+        self.batch_size = batch_size
+
+        self.train_dataset = None
+        self.validation_dataset = None
+        self.test_dataset = None
+
+    def setup(self, stage: Optional[str] = None) -> None:
+        if stage == 'fit':
+            self.train_dataset = SentenceDataset(self.data_train_path)
+            self.validation_dataset = SentenceDataset(self.data_dev_path)
+        elif stage == 'test':
+            self.test_dataset = SentenceDataset(self.data_test_path)
+
+    def train_dataloader(self, *args, **kwargs) -> DataLoader:
+        return self.train_dataset.dataloader(batch_size=self.batch_size, shuffle=True)
+
+    def val_dataloader(self, *args, **kwargs) -> Union[DataLoader, List[DataLoader]]:
+        return self.validation_dataset.dataloader(batch_size=self.batch_size, shuffle=False)
+
+    def test_dataloader(self, *args, **kwargs) -> Union[DataLoader, List[DataLoader]]:
+        return self.test_dataset.dataloader(batch_size=self.batch_size, shuffle=False)
+
+
 
 en_train_dataset = SentenceDataset(sentences_path=EN_TRAIN_PATH)
 en_dev_dataset = SentenceDataset(sentences_path=EN_TRAIN_PATH)
@@ -235,8 +267,11 @@ number_words = len(en_train_dataset.word2idx)
 number_pos = len(en_train_dataset.pos2idx)
 
 
+
 # '''
-class StudentModel(nn.Module):  # ,Model):
+
+
+class StudentModel(pl.LightningModule):
 
     # STUDENT: construct here your model
     # this class should be loading your weights and vocabulary
@@ -244,17 +279,17 @@ class StudentModel(nn.Module):  # ,Model):
     # possible languages: ["EN", "FR", "ES"]
     # REMINDER: EN is mandatory the others are extras
     def __init__(self, language: str,  # pos embedding vectors
-                n_words,
-                n_pos,
-                input_dim=100,
-                hidden1=128,  # dimension of the first hidden layer
-                p=0.0,  # probability of dropout layer
-                bidirectional=False,  # flag to decide if the LSTM must be bidirectional
-                lstm_layers=1,  # layers of the LSTM
-                num_classes=28):  # loss function
+                 n_words,
+                 n_pos,
+                 input_dim=100,
+                 hidden1=128,  # dimension of the first hidden layer
+                 p=0.0,  # probability of dropout layer
+                 bidirectional=False,  # flag to decide if the LSTM must be bidirectional
+                 lstm_layers=1,  # layers of the LSTM
+                 num_classes=28):  # loss function
         super().__init__()
         self.embedding = nn.Embedding(n_words, 100)
-        self.pos_embeddings = None #nn.Embedding(n_pos, 20)
+        self.pos_embeddings = None  # nn.Embedding(n_pos, 20)
         self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden1, dropout=p, num_layers=lstm_layers,
                             batch_first=True, bidirectional=bidirectional)
         hidden1 = hidden1 * 2 if bidirectional else hidden1  # computing the dimension of the linear layer based on if the LSTM is bidirectional or not
@@ -264,10 +299,10 @@ class StudentModel(nn.Module):  # ,Model):
         # load the specific model for the input language
         self.language = language
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=28)
-
+        self.val_f1 = torchmetrics.classification.F1Score(ignore_index=27).to(device)
     # forward method, automatically called when calling the instance
     # it takes the input tokens'indices, the labels'indices and the PoS tags'indices linked to input tokens
-    def forward(self, X, y, X_pos=None):
+    def forward(self, X,X_len,X_pos,y,ids):
         embeddings = self.embedding(X)  # expanding the words from indices to embedding vectors
         if self.pos_embeddings is not None:
             pos_embeddings = self.pos_embeddings(
@@ -278,58 +313,95 @@ class StudentModel(nn.Module):  # ,Model):
         out = self.dropout(lstm_out)
         out = torch.relu(out)
         out = self.lin1(out)
-        out = torch.softmax(out, dim=-1)
-        return out
+        out = out.view(-1, out.shape[-1])
+        logits = out
+        y = y.view(-1)
+        pred = torch.softmax(out, dim=-1)
+        result = {'logits': logits, 'pred': pred, "labels":y}
 
-    def predict(self, sentence):
-        """
-        --> !!! STUDENT: implement here your predict function !!! <--
+        # compute loss
+        if y is not None:
+            # while mathematically the CrossEntropyLoss takes as input the probability distributions,
+            # torch optimizes its computation internally and takes as input the logits instead
+            loss = self.loss_fn(logits, y)
+            result['loss'] = loss
 
-        Args:
-            sentence: a dictionary that represents an input sentence, for example:
-                - If you are doing argument identification + argument classification:
-                    {
-                        "words":
-                            [  "In",  "any",  "event",  ",",  "Mr.",  "Englund",  "and",  "many",  "others",  "say",  "that",  "the",  "easy",  "gains",  "in",  "narrowing",  "the",  "trade",  "gap",  "have",  "already",  "been",  "made",  "."  ]
-                        "lemmas":
-                            ["in", "any", "event", ",", "mr.", "englund", "and", "many", "others", "say", "that", "the", "easy", "gain", "in", "narrow", "the", "trade", "gap", "have", "already", "be", "make",  "."],
-                        "predicates":
-                            ["_", "_", "_", "_", "_", "_", "_", "_", "_", "AFFIRM", "_", "_", "_", "_", "_", "REDUCE_DIMINISH", "_", "_", "_", "_", "_", "_", "MOUNT_ASSEMBLE_PRODUCE", "_" ],
-                    },
-                - If you are doing predicate disambiguation + argument identification + argument classification:
-                    {
-                        "words": [...], # SAME AS BEFORE
-                        "lemmas": [...], # SAME AS BEFORE
-                        "predicates":
-                            [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0 ],
-                    },
-                - If you are doing predicate identification + predicate disambiguation + argument identification + argument classification:
-                    {
-                        "words": [...], # SAME AS BEFORE
-                        "lemmas": [...], # SAME AS BEFORE
-                        # NOTE: you do NOT have a "predicates" field here.
-                    },
+        return result
 
-        Returns:
-            A dictionary with your predictions:
-                - If you are doing argument identification + argument classification:
-                    {
-                        "roles": list of lists, # A list of roles for each predicate in the sentence.
-                    }
-                - If you are doing predicate disambiguation + argument identification + argument classification:
-                    {
-                        "predicates": list, # A list with your predicted predicate senses, one for each token in the input sentence.
-                        "roles": dictionary of lists, # A list of roles for each pre-identified predicate (index) in the sentence.
-                    }
-                - If you are doing predicate identification + predicate disambiguation + argument identification + argument classification:
-                    {
-                        "predicates": list, # A list of predicate senses, one for each token in the sentence, null ("_") included.
-                        "roles": dictionary of lists, # A list of roles for each predicate (index) you identify in the sentence.
-                    }
-        """
-        pass
+    def training_step(
+            self,
+            batch: Tuple[torch.Tensor],
+            batch_idx: int
+    ) -> torch.Tensor:
+        forward_output = self.forward(*batch)
+        return forward_output['loss']
+
+    def validation_step(
+            self,
+            batch: Tuple[torch.Tensor],
+            batch_idx: int
+    ):
+        forward_output = self.forward(*batch)
+
+        self.val_f1(forward_output['pred'], forward_output["labels"])
+
+        self.log('val_f1', self.val_f1, prog_bar=True)
+        self.log('val_loss', forward_output['loss'], prog_bar=True)
+
+    def test_step(
+            self,
+            batch: Tuple[torch.Tensor],
+            batch_idx: int
+    ):
+        forward_output = self.forward(*batch)
+        self.val_f1(forward_output['pred'], batch[3])
+        self.log('test_f1', self.val_f1, prog_bar=True)
+
+    def loss(self, pred, y):
+        return self.loss_fn(pred, y)
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.SGD(self.parameters(), lr=0.1, momentum=0.0)
+        #optimizer = torch.optim.Adam(model.parameters(), lr=0.0005,weight_decay=0.000)  # instantiating the optimizer
+        return optimizer
 
 
+early_stopping = pl.callbacks.EarlyStopping(
+    monitor='val_f1',  # the value that will be evaluated to activate the early stopping of the model.
+    patience=10,  # the number of consecutive attempts that the model has to raise (or lower depending on the metric used) to raise the "monitor" value.
+    verbose=True,  # whether to log or not information in the console.
+    mode='max', # wheter we want to maximize (max) or minimize the "monitor" value.
+)
+
+check_point_callback = pl.callbacks.ModelCheckpoint(
+    monitor='val_f1',  # the value that we want to use for model selection.
+    verbose=True,  # whether to log or not information in the console.
+    save_top_k=3,  # the number of checkpoints we want to store.
+    mode='max',  # wheter we want to maximize (max) or minimize the "monitor" value.
+    dirpath='experiments/amazon_reviews_classifier',  # output directory path
+    filename='{epoch}-{val_f1:.4f}'  # the prefix on the checkpoint values. Metrics store by the trainer can be used to dynamically change the name.
+)
+
+sentences_dm = SentencesDataModule(
+    data_train_path=EN_TRAIN_PATH,
+    data_dev_path=EN_DEV_PATH,
+    data_test_path=EN_DEV_PATH,
+    batch_size=32
+)
+
+classifier = StudentModel(language="en",n_words=number_words,n_pos=number_pos)
+
+
+# the PyTorch Lightning Trainer
+trainer = pl.Trainer(
+    max_epochs=100,  # maximum number of epochs.
+    gpus=1,  # the number of gpus we have at our disposal.
+    callbacks=[early_stopping, check_point_callback]  # the callback we want our trainer to use.
+)
+
+# and finally we can let the "trainer" fit the amazon reviews classifier.
+trainer.fit(model=classifier, datamodule=sentences_dm)
+'''
 # trainer class
 class Trainer():
 
@@ -412,7 +484,9 @@ class Trainer():
 
 
 # '''
+'''
 model = StudentModel(language="en",n_words=number_words,n_pos=number_pos,lstm_layers=5,bidirectional=True).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.0005, weight_decay=0.000)  # instantiating the optimizer
 trainer = Trainer(model=model, optimizer=optimizer)  # instantiating the trainer
 histories = trainer.train(train_dataset=en_train_dataset,dev_dataset=en_dev_dataset,patience=0,epochs=100)    #training
+#'''
