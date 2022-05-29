@@ -1,4 +1,5 @@
 import json
+import string
 
 import numpy as np
 from typing import List, Tuple, Optional, Union
@@ -8,6 +9,7 @@ import random
 import csv
 import matplotlib.pyplot as plt
 import nltk
+import transformers
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from nltk.data import load
@@ -24,6 +26,15 @@ from sklearn.metrics import confusion_matrix
 import copy
 import torchmetrics
 import pytorch_lightning as pl
+import torch
+from transformers import BertTokenizer, BertModel
+
+# OPTIONAL: if you want to have more information on what's happening, activate the logger as follows
+import logging
+#logging.basicConfig(level=logging.INFO)
+
+import matplotlib.pyplot as plt
+
 # seeds for reproducibility
 torch.manual_seed(42)
 np.random.seed(42)
@@ -72,11 +83,12 @@ class SentenceDataset(Dataset):
                  test=False):
         self.sentences = self.read_file(sentences_path) if sentences_path else self.read_sentences(sentences)
         features = ["words", "lemmas"]
-        word_list = self.read_sentences(features)
-        self.word2idx = self.create_vocabulary(word_list)
-        features = ["pos"]
-        pos_list = self.read_sentences(features)
-        self.pos2idx = self.create_vocabulary(pos_list)
+        self.bert_preprocess(self.sentences)
+        #word_list = self.read_sentences(features)
+        #self.word2idx = self.create_vocabulary(word_list)
+        #features = ["pos"]
+        #pos_list = self.read_sentences(features)
+        #self.pos2idx = self.create_vocabulary(pos_list)
         self.SEMANTIC_ROLES = ["AGENT", "ASSET", "ATTRIBUTE", "BENEFICIARY", "CAUSE", "CO-AGENT", "CO-PATIENT",
                                "CO-THEME", "DESTINATION",
                                "EXPERIENCER", "EXTENT", "GOAL", "IDIOM", "INSTRUMENT", "LOCATION", "MATERIAL",
@@ -147,6 +159,38 @@ class SentenceDataset(Dataset):
         sentence["pos"] = [pos for word, pos in tokens_n_pos]
         return sentence
 
+    def bert_preprocess(self,sentences):
+        tokenizer = BertTokenizer.from_pretrained("bert-base-cased")
+        for sentence in sentences:
+            text = "[CLS] "+ " ".join(sentence["words"])+" [SEP]"
+            non_joined_text = ["_"]+sentence["words"]+["_"]
+            roles = ["_"]+sentence["roles"]+["_"]
+            tokenized = tokenizer.tokenize(text)
+            x_index, y_index = 1,1
+            tokenized_roles = ['_']
+            '''
+            while x_index < len(tokenized)-1:
+                if tokenized[x_index].startswith('#'):
+                    tokenized_roles.append('_')
+                    x_index += 1
+                elif len(tokenized[x_index]) > 1 and tokenized[x_index][0] in string.punctuation :
+                    temp = tokenized[x_index]
+                    tokenized[x_index] = temp[0]
+                    tokenized.insert(x_index,temp[1:])
+                else:
+                    tokenized_roles.append(roles[y_index])
+                    x_index += 1
+                    y_index += 1
+            '''
+            tokenized_roles.append('_')
+            encoded = tokenizer.convert_tokens_to_ids(non_joined_text)
+            segments_ids = [1] * len(non_joined_text)
+            sentence["segment_ids"] = segments_ids
+            sentence["encoded_words"] = encoded
+            sentence["tokenized_roles"] = ["_"]+sentence["roles"]+["_"]
+            #assert len(tokenized_roles) == len(non_joined_text)
+        return sentences
+
     def create_vocabulary(self, word_list):
         word2idx = dict()
         for i, word in enumerate(word_list):
@@ -196,21 +240,18 @@ class SentenceDataset(Dataset):
     # it's needed because we are dealing with sentences of variable length and we need padding
     # to be sure that each sentence in a batch has the same length, which is necessary
     def collate(self, data):
-        X = [self.sent2idx(instance["words"], self.word2idx) for instance in data]  # extracting the input sentence
+        X = [torch.tensor(instance["encoded_words"]) for instance in data]  # extracting the input sentence
         X_len = torch.tensor([x.size(0) for x in X], dtype=torch.long).to(
             device)  # extracting the length for each sentence
-        X_pos = [self.sent2idx(instance["pos"], self.pos2idx) for instance in
-                 data]  # extracting pos tags for each sentence
-        y = [self.sent2idx(instance["roles"], self.roles2idx) for instance in data]  # extracting labels for each sentence
+        #X_pos = [self.sent2idx(instance["pos"], self.pos2idx) for instance in data]  # extracting pos tags for each sentence
+        segment_ids = [torch.tensor(instance["segment_ids"]) for instance in data]
+        y = [self.sent2idx(instance["tokenized_roles"], self.roles2idx) for instance in data]  # extracting labels for each sentence
         ids = [instance["id"] for instance in data]  # extracting the sentences' ids
-        X = torch.nn.utils.rnn.pad_sequence(X, batch_first=True, padding_value=1).to(
-            device)  # padding all the sentences to the maximum length in the batch (forcefully max_len)
-        X_pos = torch.nn.utils.rnn.pad_sequence(X_pos, batch_first=True, padding_value=1).to(
-            device)  # padding all the pos tags
-        y = torch.nn.utils.rnn.pad_sequence(y, batch_first=True, padding_value=self.roles2idx[PAD_TOKEN]).to(
-            device)  # padding all the labels
-
-        return X, X_len, X_pos, y, ids
+        X = torch.nn.utils.rnn.pad_sequence(X, batch_first=True, padding_value=1).to(device)  # padding all the sentences to the maximum length in the batch (forcefully max_len)
+        #X_pos = torch.nn.utils.rnn.pad_sequence(X_pos, batch_first=True, padding_value=1).to(device)  # padding all the pos tags
+        y = torch.nn.utils.rnn.pad_sequence(y, batch_first=True, padding_value=self.roles2idx[PAD_TOKEN]).to(device)  # padding all the labels
+        segment_ids = torch.nn.utils.rnn.pad_sequence(segment_ids, batch_first=True, padding_value=1).to(device)
+        return X, X_len, segment_ids, y, ids
 
 
     # function to convert the output ids to the corresponding labels
@@ -263,8 +304,8 @@ class SentencesDataModule(pl.LightningDataModule):
 en_train_dataset = SentenceDataset(sentences_path=EN_TRAIN_PATH)
 en_dev_dataset = SentenceDataset(sentences_path=EN_TRAIN_PATH)
 # print(en_dataset[0])
-number_words = len(en_train_dataset.word2idx)
-number_pos = len(en_train_dataset.pos2idx)
+#number_words = len(en_train_dataset.word2idx)
+#number_pos = len(en_train_dataset.pos2idx)
 
 
 
@@ -279,17 +320,15 @@ class StudentModel(pl.LightningModule):
     # possible languages: ["EN", "FR", "ES"]
     # REMINDER: EN is mandatory the others are extras
     def __init__(self, language: str,  # pos embedding vectors
-                 n_words,
-                 n_pos,
-                 input_dim=100,
+                 input_dim=768,
                  hidden1=128,  # dimension of the first hidden layer
                  p=0.0,  # probability of dropout layer
                  bidirectional=False,  # flag to decide if the LSTM must be bidirectional
                  lstm_layers=1,  # layers of the LSTM
                  num_classes=28):  # loss function
         super().__init__()
-        self.embedding = nn.Embedding(n_words, 100)
-        self.pos_embeddings = None  # nn.Embedding(n_pos, 20)
+        #self.embedding = nn.Embedding(n_words, input_dim)
+        #self.pos_embeddings = None  # nn.Embedding(n_pos, 20)
         self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden1, dropout=p, num_layers=lstm_layers,
                             batch_first=True, bidirectional=bidirectional)
         hidden1 = hidden1 * 2 if bidirectional else hidden1  # computing the dimension of the linear layer based on if the LSTM is bidirectional or not
@@ -298,18 +337,47 @@ class StudentModel(pl.LightningModule):
         self.num_classes = num_classes
         # load the specific model for the input language
         self.language = language
-        self.loss_fn = nn.CrossEntropyLoss(ignore_index=28)
-        self.val_f1 = torchmetrics.classification.F1Score(ignore_index=27).to(device)
+        self.loss_fn = nn.CrossEntropyLoss(ignore_index=27)
+        self.f1 = torchmetrics.classification.F1Score(ignore_index=27).to(device)
+        self.bert = BertModel.from_pretrained("bert-base-cased",output_hidden_states=True)
+        #self.bert.eval()
     # forward method, automatically called when calling the instance
     # it takes the input tokens'indices, the labels'indices and the PoS tags'indices linked to input tokens
-    def forward(self, X,X_len,X_pos,y,ids):
-        embeddings = self.embedding(X)  # expanding the words from indices to embedding vectors
+    def forward(self, X,X_len,segment_ids,y,ids):
+        outputs = self.bert(X,segment_ids)
+        hidden_states = outputs[2]
+        token_embeddings = torch.stack(hidden_states, dim=0)
+        token_embeddings = torch.reshape(token_embeddings,shape=(token_embeddings.size(0),token_embeddings.size(1)*token_embeddings.size(2),token_embeddings.size(3)))
+        token_embeddings = token_embeddings.permute(1, 0, 2)
+        token_vecs_cat = []
+        for token in token_embeddings:
+            # `token` is a [12 x 768] tensor
+            '''
+            # Concatenate the vectors (that is, append them together) from the last
+            # four layers.
+            # Each layer vector is 768 values, so `cat_vec` is length 3,072.
+            cat_vec = torch.cat((token[-1], token[-2], token[-3], token[-4]), dim=0)
+
+            # Use `cat_vec` to represent `token`.
+            token_vecs_cat.append(cat_vec)
+
+            '''
+            # Sum the vectors from the last four layers.
+            sum_vec = torch.sum(token[-4:], dim=0)
+            
+            # Use `sum_vec` to represent `token`.
+            token_vecs_cat.append(sum_vec)
+            #'''
+        #embeddings = self.embedding(X)  # expanding the words from indices to embedding vectors
+        '''
         if self.pos_embeddings is not None:
             pos_embeddings = self.pos_embeddings(
                 X_pos)  # in the case I'm using pos embeddings, I pass their indexes through their own embedding layer
             embeddings = torch.cat([embeddings, pos_embeddings],
                                    dim=-1)  # and then concatenate them to the corresponding words
-        lstm_out = self.lstm(embeddings)[0]
+        '''
+        token_vecs_cat = torch.stack(token_vecs_cat, dim=0)
+        lstm_out = self.lstm(token_vecs_cat)[0]
         out = self.dropout(lstm_out)
         out = torch.relu(out)
         out = self.lin1(out)
@@ -334,6 +402,10 @@ class StudentModel(pl.LightningModule):
             batch_idx: int
     ) -> torch.Tensor:
         forward_output = self.forward(*batch)
+        self.f1(forward_output['pred'], forward_output["labels"])
+
+        self.log('train_f1', self.f1, prog_bar=True)
+        self.log('train_loss', forward_output['loss'], prog_bar=True)
         return forward_output['loss']
 
     def validation_step(
@@ -343,9 +415,9 @@ class StudentModel(pl.LightningModule):
     ):
         forward_output = self.forward(*batch)
 
-        self.val_f1(forward_output['pred'], forward_output["labels"])
+        self.f1(forward_output['pred'], forward_output["labels"])
 
-        self.log('val_f1', self.val_f1, prog_bar=True)
+        self.log('val_f1', self.f1, prog_bar=True)
         self.log('val_loss', forward_output['loss'], prog_bar=True)
 
     def test_step(
@@ -354,15 +426,15 @@ class StudentModel(pl.LightningModule):
             batch_idx: int
     ):
         forward_output = self.forward(*batch)
-        self.val_f1(forward_output['pred'], batch[3])
-        self.log('test_f1', self.val_f1, prog_bar=True)
+        self.f1(forward_output['pred'], forward_output["labels"])
+        self.log('test_f1', self.f1, prog_bar=True)
 
     def loss(self, pred, y):
         return self.loss_fn(pred, y)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.SGD(self.parameters(), lr=0.1, momentum=0.0)
-        #optimizer = torch.optim.Adam(model.parameters(), lr=0.0005,weight_decay=0.000)  # instantiating the optimizer
+        #optimizer = torch.optim.SGD(self.parameters(), lr=0.1, momentum=0.0)
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.1,weight_decay=0.000)  # instantiating the optimizer
         return optimizer
 
 
@@ -378,7 +450,6 @@ check_point_callback = pl.callbacks.ModelCheckpoint(
     verbose=True,  # whether to log or not information in the console.
     save_top_k=3,  # the number of checkpoints we want to store.
     mode='max',  # wheter we want to maximize (max) or minimize the "monitor" value.
-    dirpath='experiments/amazon_reviews_classifier',  # output directory path
     filename='{epoch}-{val_f1:.4f}'  # the prefix on the checkpoint values. Metrics store by the trainer can be used to dynamically change the name.
 )
 
@@ -389,7 +460,7 @@ sentences_dm = SentencesDataModule(
     batch_size=32
 )
 
-classifier = StudentModel(language="en",n_words=number_words,n_pos=number_pos)
+classifier = StudentModel(language="en",hidden1=512,lstm_layers=2,bidirectional=True)
 
 
 # the PyTorch Lightning Trainer
