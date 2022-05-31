@@ -65,7 +65,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 # setting unknown token to handle out of vocabulary words and padding token to pad sentences
 UNK_TOKEN = '<unk>'
-PAD_TOKEN = '_' #???????????????
+#PAD_TOKEN = '_' #???????????????
+PAD_TOKEN = '<pad>'
 EN_TRAIN_PATH = "./../../data/EN/train.json"
 EN_DEV_PATH = "./../../data/EN/dev.json"
 print(torch.version.cuda)
@@ -89,7 +90,7 @@ class SentenceDataset(Dataset):
         #features = ["pos"]
         #pos_list = self.read_sentences(features)
         #self.pos2idx = self.create_vocabulary(pos_list)
-        self.SEMANTIC_ROLES = ["AGENT", "ASSET", "ATTRIBUTE", "BENEFICIARY", "CAUSE", "CO-AGENT", "CO-PATIENT",
+        self.SEMANTIC_ROLES = ["<pad>","AGENT", "ASSET", "ATTRIBUTE", "BENEFICIARY", "CAUSE", "CO-AGENT", "CO-PATIENT",
                                "CO-THEME", "DESTINATION",
                                "EXPERIENCER", "EXTENT", "GOAL", "IDIOM", "INSTRUMENT", "LOCATION", "MATERIAL",
                                "PATIENT", "PRODUCT", "PURPOSE",
@@ -112,6 +113,7 @@ class SentenceDataset(Dataset):
     # little function to read and store a file given the path
     def read_file(self, path):
         sentences = list()
+        sentences_len = dict()
         with open(path) as file:
             json_file = json.load(file)
             for key in json_file:
@@ -126,19 +128,35 @@ class SentenceDataset(Dataset):
                         predicates[int(position)] = json_file[key]["predicates"][int(position)]
                         instance = copy.deepcopy(json_file[key])
                         instance["roles"] = roles
+                        instance["predicate_position"] = position
+                        instance["predicate_position"] = [0]*len(roles)
+                        instance["predicate_position"][int(position)] = 1
                         # instance["roles_bin"] = [1 if role != "_" else 0 for role in roles]
                         instance["predicates"] = predicates
+                        instance["attention_mask"] = [False]*len(roles)
+                        start = max(0,int(position)-3)
+                        stop = min(len(roles),int(position)+3)
+                        for i in range(start,stop): instance["attention_mask"][i] = True
+                        #instance["attention_mask"][max([int(position)-10,0]):min([int(position)+10,len(roles)])] = [1]*21
                         sentences.append(self.text_preprocess(instance))
                 else:
                     instance = copy.deepcopy(json_file[key])
+
                     if json_file[key]["predicates"].count("_") == len(json_file[key]["predicates"]):
-                        roles = ["_" for i in range(len(json_file[key]["predicates"]))]
-                        instance["roles"] = roles
+                        instance["roles"] = ["_" for i in range(len(json_file[key]["predicates"]))]
+                        instance["predicate_position"] = [1] * len(instance["roles"])
+
                         # instance["roles_bin"] = [1 if role != "_" else 0 for role in roles]
                     else:
                         k = list(instance["roles"].keys())[0]
                         instance["roles"] = instance["roles"][k]
+                        instance["predicate_position"] = [0] * len(instance["roles"])
+                        instance["predicate_position"][int(k)] = 1
                         # instance["roles_bin"] = [1 if role != "_" else 0 for role in instance["roles"]]
+                    instance["attention_mask"] = [False] * len(instance["roles"])
+                    start = max(0, int(position) - 3)
+                    stop = min(len(instance["roles"]), int(position) + 3)
+                    for i in range(start, stop): instance["attention_mask"][i] = True
                     sentences.append(self.text_preprocess(instance))
         return sentences
 
@@ -159,15 +177,15 @@ class SentenceDataset(Dataset):
         sentence["pos"] = [pos for word, pos in tokens_n_pos]
         return sentence
 
-    def bert_preprocess(self,sentences):
+    def bert_preprocess(self,sentences):    #TODO tokenize with bert
         tokenizer = BertTokenizer.from_pretrained("bert-base-cased")
         for sentence in sentences:
             text = "[CLS] "+ " ".join(sentence["words"])+" [SEP]"
-            non_joined_text = ["_"]+sentence["words"]+["_"]
-            roles = ["_"]+sentence["roles"]+["_"]
+            non_joined_text = ["<pad>"]+sentence["words"]+["<pad>"]
+            roles = ["<pad>"]+sentence["roles"]+["<pad>"]
             tokenized = tokenizer.tokenize(text)
             x_index, y_index = 1,1
-            tokenized_roles = ['_']
+            tokenized_roles = ['<pad>']
             '''
             while x_index < len(tokenized)-1:
                 if tokenized[x_index].startswith('#'):
@@ -182,12 +200,14 @@ class SentenceDataset(Dataset):
                     x_index += 1
                     y_index += 1
             '''
-            tokenized_roles.append('_')
+            tokenized_roles.append('<pad>')
             encoded = tokenizer.convert_tokens_to_ids(non_joined_text)
             segments_ids = [1] * len(non_joined_text)
             sentence["segment_ids"] = segments_ids
             sentence["encoded_words"] = encoded
-            sentence["tokenized_roles"] = ["_"]+sentence["roles"]+["_"]
+            sentence["tokenized_roles"] = ["<pad>"]+sentence["roles"]+["<pad>"]
+            sentence["predicate_position"] = [0] + sentence["predicate_position"] + [0]
+            sentence["attention_mask"] = [0]+sentence["attention_mask"]+[0]
             #assert len(tokenized_roles) == len(non_joined_text)
         return sentences
 
@@ -245,13 +265,18 @@ class SentenceDataset(Dataset):
             device)  # extracting the length for each sentence
         #X_pos = [self.sent2idx(instance["pos"], self.pos2idx) for instance in data]  # extracting pos tags for each sentence
         segment_ids = [torch.tensor(instance["segment_ids"]) for instance in data]
+        predicate_position = [torch.tensor(instance["predicate_position"]) for instance in data]
+        attention_mask = [torch.tensor(instance["attention_mask"],dtype=torch.bool) for instance in data]
         y = [self.sent2idx(instance["tokenized_roles"], self.roles2idx) for instance in data]  # extracting labels for each sentence
         ids = [instance["id"] for instance in data]  # extracting the sentences' ids
-        X = torch.nn.utils.rnn.pad_sequence(X, batch_first=True, padding_value=1).to(device)  # padding all the sentences to the maximum length in the batch (forcefully max_len)
+        X = torch.nn.utils.rnn.pad_sequence(X, batch_first=True, padding_value=100).to(device)  # padding all the sentences to the maximum length in the batch (forcefully max_len)
         #X_pos = torch.nn.utils.rnn.pad_sequence(X_pos, batch_first=True, padding_value=1).to(device)  # padding all the pos tags
         y = torch.nn.utils.rnn.pad_sequence(y, batch_first=True, padding_value=self.roles2idx[PAD_TOKEN]).to(device)  # padding all the labels
-        segment_ids = torch.nn.utils.rnn.pad_sequence(segment_ids, batch_first=True, padding_value=1).to(device)
-        return X, X_len, segment_ids, y, ids
+        predicate_position = torch.nn.utils.rnn.pad_sequence(predicate_position, batch_first=True, padding_value=100).to(device)  # padding all the labels
+        attention_mask = torch.nn.utils.rnn.pad_sequence(attention_mask, batch_first=True, padding_value=0).to(device)
+        segment_ids = torch.nn.utils.rnn.pad_sequence(segment_ids, batch_first=True, padding_value=0).to(device)
+
+        return X, X_len, segment_ids, y, predicate_position,attention_mask, ids
 
 
     # function to convert the output ids to the corresponding labels
@@ -321,7 +346,8 @@ class StudentModel(pl.LightningModule):
     # REMINDER: EN is mandatory the others are extras
     def __init__(self, language: str,  # pos embedding vectors
                  input_dim=768,
-                 hidden1=128,  # dimension of the first hidden layer
+                 hidden1=768,  # dimension of the first hidden layer
+                 hidden2=768,
                  p=0.0,  # probability of dropout layer
                  bidirectional=False,  # flag to decide if the LSTM must be bidirectional
                  lstm_layers=1,  # layers of the LSTM
@@ -329,25 +355,29 @@ class StudentModel(pl.LightningModule):
         super().__init__()
         #self.embedding = nn.Embedding(n_words, input_dim)
         #self.pos_embeddings = None  # nn.Embedding(n_pos, 20)
-        self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden1, dropout=p, num_layers=lstm_layers,
-                            batch_first=True, bidirectional=bidirectional)
+        #self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden1, dropout=p, num_layers=lstm_layers,
+        #                    batch_first=True, bidirectional=bidirectional)
         hidden1 = hidden1 * 2 if bidirectional else hidden1  # computing the dimension of the linear layer based on if the LSTM is bidirectional or not
-        self.lin1 = nn.Linear(hidden1, num_classes)
+        self.lin1 = nn.Linear(hidden1, hidden2)
+        self.lin2 = nn.Linear(hidden2, num_classes)
         self.dropout = nn.Dropout(p=p)
         self.num_classes = num_classes
+        self.hidden1 = hidden1
         # load the specific model for the input language
         self.language = language
-        self.loss_fn = nn.CrossEntropyLoss(ignore_index=27)
-        self.f1 = torchmetrics.classification.F1Score(ignore_index=27).to(device)
-        self.bert = BertModel.from_pretrained("bert-base-cased",output_hidden_states=True)
+        self.loss_fn = nn.CrossEntropyLoss()
+        self.f1 = torchmetrics.classification.F1Score().to(device)
+        self.bert = BertModel.from_pretrained("bert-base-cased",output_hidden_states=True, is_decoder=True,
+                                              add_cross_attention=True)
         #self.bert.eval()
     # forward method, automatically called when calling the instance
     # it takes the input tokens'indices, the labels'indices and the PoS tags'indices linked to input tokens
-    def forward(self, X,X_len,segment_ids,y,ids):
-        outputs = self.bert(X,segment_ids)
+    def forward(self, X,X_len,segment_ids,y,predicate_position,attention_mask,ids):
+        outputs = self.bert(input_ids=X,token_type_ids=segment_ids)
         hidden_states = outputs[2]
         token_embeddings = torch.stack(hidden_states, dim=0)
-        token_embeddings = torch.reshape(token_embeddings,shape=(token_embeddings.size(0),token_embeddings.size(1)*token_embeddings.size(2),token_embeddings.size(3)))
+        token_embeddings = torch.reshape(token_embeddings,shape=(token_embeddings.size(0),token_embeddings.size(1)*
+                                                                 token_embeddings.size(2),token_embeddings.size(3)))
         token_embeddings = token_embeddings.permute(1, 0, 2)
         token_vecs_cat = []
         for token in token_embeddings:
@@ -377,15 +407,54 @@ class StudentModel(pl.LightningModule):
                                    dim=-1)  # and then concatenate them to the corresponding words
         '''
         token_vecs_cat = torch.stack(token_vecs_cat, dim=0)
-        lstm_out = self.lstm(token_vecs_cat)[0]
-        out = self.dropout(lstm_out)
+        #lstm_out = self.lstm(token_vecs_cat)[0]
+        #out = self.dropout(token_vecs_cat)
+        #out = torch.relu(out)
+        out = self.lin1(token_vecs_cat)
+        out = self.dropout(out)
         out = torch.relu(out)
         out = self.lin1(out)
         out = out.view(-1, out.shape[-1])
         logits = out
         y = y.view(-1)
         pred = torch.softmax(out, dim=-1)
-        result = {'logits': logits, 'pred': pred, "labels":y}
+        '''
+        masked_around_y = torch.masked_select(y,attention_mask.view(-1))
+        mask = torch.tensor([[True if element else False for _ in range(self.hidden1)] for element in attention_mask.view(-1)],dtype=torch.bool).to(device)
+        masked_around_pred = torch.masked_select(pred,mask).view(-1,pred.size(1))
+        masked_around_logits = torch.masked_select(logits,mask).view(-1,logits.size(1))
+
+        mask_pad_y = (masked_around_y != 0)
+        mask = torch.tensor(
+            [[True if element else False for _ in range(self.hidden1)] for element in mask_pad_y],
+            dtype=torch.bool).to(device)
+        masked_y = torch.masked_select(masked_around_y, mask_pad_y)
+        masked_pred = torch.masked_select(masked_around_pred,mask).view(-1,pred.size(1))
+        masked_logits = torch.masked_select(masked_around_logits,mask).view(-1,logits.size(1))
+
+        mask_y = (masked_y != 28)
+        mask = torch.tensor(
+            [[True if element else False for _ in range(self.hidden1)] for element in mask_y],
+            dtype=torch.bool).to(device)
+        masked_y = torch.masked_select(masked_y,mask_y)
+        masked_pred = torch.masked_select(masked_pred,mask).view(-1,pred.size(1))
+        masked_logits = torch.masked_select(masked_logits,mask).view(-1,logits.size(1))
+        '''
+        masked_around_y = y[attention_mask.view(-1)]
+        masked_around_pred = pred[attention_mask.view(-1)]
+        masked_around_logits = logits[attention_mask.view(-1)]
+
+        mask = (masked_around_y != 0)
+        masked_y = masked_around_y[mask]
+        masked_pred = masked_around_pred[mask]
+        masked_logits = masked_around_logits[mask]
+
+        mask_y = (masked_y != 28)
+        masked_y = masked_y[mask_y]
+        masked_pred = masked_pred[mask_y]
+        masked_logits = masked_logits[mask_y]
+
+        result = {'logits': masked_logits, 'pred': masked_pred, "labels":masked_y}
 
         # compute loss
         if y is not None:
@@ -434,7 +503,7 @@ class StudentModel(pl.LightningModule):
 
     def configure_optimizers(self):
         #optimizer = torch.optim.SGD(self.parameters(), lr=0.1, momentum=0.0)
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.1,weight_decay=0.000)  # instantiating the optimizer
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.001,weight_decay=0.000)  # instantiating the optimizer
         return optimizer
 
 
@@ -460,7 +529,7 @@ sentences_dm = SentencesDataModule(
     batch_size=32
 )
 
-classifier = StudentModel(language="en",hidden1=512,lstm_layers=2,bidirectional=True)
+classifier = StudentModel(language="en",hidden1=768,lstm_layers=1,bidirectional=False,p=0.0)
 
 
 # the PyTorch Lightning Trainer
