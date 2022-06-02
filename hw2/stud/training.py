@@ -61,7 +61,7 @@ POS_EMBEDDING_DIM = 10
 
 # specify the device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# device = torch.device("cpu")
+#device = torch.device("cpu")
 print(device)
 # setting unknown token to handle out of vocabulary words and padding token to pad sentences
 UNK_TOKEN = '<unk>'
@@ -133,10 +133,11 @@ class SentenceDataset(Dataset):
                         instance["predicate_position"][int(position)] = 1
                         # instance["roles_bin"] = [1 if role != "_" else 0 for role in roles]
                         instance["predicates"] = predicates
-                        instance["attention_mask"] = [False]*len(roles)
-                        start = max(0,int(position)-3)
-                        stop = min(len(roles),int(position)+3)
-                        for i in range(start,stop): instance["attention_mask"][i] = True
+                        instance["attention_mask"] = [1]*len(roles)
+                        #instance["around_predicate"] = [0]*len(roles)
+                        start = max(0,int(position)-10)
+                        stop = min(len(roles),int(position)+10)
+                        #for i in range(start,stop): instance["around_predicate"][i] = 1
                         #instance["attention_mask"][max([int(position)-10,0]):min([int(position)+10,len(roles)])] = [1]*21
                         sentences.append(self.text_preprocess(instance))
                 else:
@@ -152,11 +153,12 @@ class SentenceDataset(Dataset):
                         instance["roles"] = instance["roles"][k]
                         instance["predicate_position"] = [0] * len(instance["roles"])
                         instance["predicate_position"][int(k)] = 1
+                        #instance["around_predicate"][int(k)] = 0
                         # instance["roles_bin"] = [1 if role != "_" else 0 for role in instance["roles"]]
-                    instance["attention_mask"] = [False] * len(instance["roles"])
-                    start = max(0, int(position) - 3)
-                    stop = min(len(instance["roles"]), int(position) + 3)
-                    for i in range(start, stop): instance["attention_mask"][i] = True
+                    instance["attention_mask"] = [1] * len(instance["roles"])
+                    start = max(0, int(position) - 10)
+                    stop = min(len(instance["roles"]), int(position) + 10)
+                    for i in range(start, stop): instance["attention_mask"][i] = 1
                     sentences.append(self.text_preprocess(instance))
         return sentences
 
@@ -181,7 +183,7 @@ class SentenceDataset(Dataset):
         tokenizer = BertTokenizer.from_pretrained("bert-base-cased")
         for sentence in sentences:
             text = "[CLS] "+ " ".join(sentence["words"])+" [SEP]"
-            non_joined_text = ["<pad>"]+sentence["words"]+["<pad>"]
+            non_joined_text = ["[CLS]"]+sentence["words"]+["[SEP]"]
             roles = ["<pad>"]+sentence["roles"]+["<pad>"]
             tokenized = tokenizer.tokenize(text)
             x_index, y_index = 1,1
@@ -268,15 +270,17 @@ class SentenceDataset(Dataset):
         predicate_position = [torch.tensor(instance["predicate_position"]) for instance in data]
         attention_mask = [torch.tensor(instance["attention_mask"],dtype=torch.bool) for instance in data]
         y = [self.sent2idx(instance["tokenized_roles"], self.roles2idx) for instance in data]  # extracting labels for each sentence
+        #around_predicate = [torch.tensor(instance["around_predicate"],dtype=torch.bool) for instance in data]
         ids = [instance["id"] for instance in data]  # extracting the sentences' ids
         X = torch.nn.utils.rnn.pad_sequence(X, batch_first=True, padding_value=100).to(device)  # padding all the sentences to the maximum length in the batch (forcefully max_len)
         #X_pos = torch.nn.utils.rnn.pad_sequence(X_pos, batch_first=True, padding_value=1).to(device)  # padding all the pos tags
         y = torch.nn.utils.rnn.pad_sequence(y, batch_first=True, padding_value=self.roles2idx[PAD_TOKEN]).to(device)  # padding all the labels
         predicate_position = torch.nn.utils.rnn.pad_sequence(predicate_position, batch_first=True, padding_value=100).to(device)  # padding all the labels
         attention_mask = torch.nn.utils.rnn.pad_sequence(attention_mask, batch_first=True, padding_value=0).to(device)
+        #around_predicate = torch.nn.utils.rnn.pad_sequence(around_predicate, batch_first=True, padding_value=0).to(device)
         segment_ids = torch.nn.utils.rnn.pad_sequence(segment_ids, batch_first=True, padding_value=0).to(device)
 
-        return X, X_len, segment_ids, y, predicate_position,attention_mask, ids
+        return X, X_len, segment_ids, y, predicate_position,attention_mask,ids
 
 
     # function to convert the output ids to the corresponding labels
@@ -351,7 +355,7 @@ class StudentModel(pl.LightningModule):
                  p=0.0,  # probability of dropout layer
                  bidirectional=False,  # flag to decide if the LSTM must be bidirectional
                  lstm_layers=1,  # layers of the LSTM
-                 num_classes=28):  # loss function
+                 num_classes=29):  # loss function
         super().__init__()
         #self.embedding = nn.Embedding(n_words, input_dim)
         #self.pos_embeddings = None  # nn.Embedding(n_pos, 20)
@@ -365,15 +369,15 @@ class StudentModel(pl.LightningModule):
         self.hidden1 = hidden1
         # load the specific model for the input language
         self.language = language
-        self.loss_fn = nn.CrossEntropyLoss()
-        self.f1 = torchmetrics.classification.F1Score().to(device)
+        self.loss_fn = nn.CrossEntropyLoss(ignore_index=0)
+        self.f1 = torchmetrics.classification.F1Score(num_classes=num_classes).to(device)
         self.bert = BertModel.from_pretrained("bert-base-cased",output_hidden_states=True, is_decoder=True,
                                               add_cross_attention=True)
         #self.bert.eval()
     # forward method, automatically called when calling the instance
     # it takes the input tokens'indices, the labels'indices and the PoS tags'indices linked to input tokens
     def forward(self, X,X_len,segment_ids,y,predicate_position,attention_mask,ids):
-        outputs = self.bert(input_ids=X,token_type_ids=segment_ids)
+        outputs = self.bert(input_ids=X,token_type_ids=segment_ids,attention_mask=attention_mask)
         hidden_states = outputs[2]
         token_embeddings = torch.stack(hidden_states, dim=0)
         token_embeddings = torch.reshape(token_embeddings,shape=(token_embeddings.size(0),token_embeddings.size(1)*
@@ -413,7 +417,7 @@ class StudentModel(pl.LightningModule):
         out = self.lin1(token_vecs_cat)
         out = self.dropout(out)
         out = torch.relu(out)
-        out = self.lin1(out)
+        out = self.lin2(out)
         out = out.view(-1, out.shape[-1])
         logits = out
         y = y.view(-1)
@@ -440,6 +444,9 @@ class StudentModel(pl.LightningModule):
         masked_pred = torch.masked_select(masked_pred,mask).view(-1,pred.size(1))
         masked_logits = torch.masked_select(masked_logits,mask).view(-1,logits.size(1))
         '''
+        pps = torch.argmax(pred,dim=1)
+        #print(pps)
+        #print(y)
         masked_around_y = y[attention_mask.view(-1)]
         masked_around_pred = pred[attention_mask.view(-1)]
         masked_around_logits = logits[attention_mask.view(-1)]
@@ -454,13 +461,25 @@ class StudentModel(pl.LightningModule):
         masked_pred = masked_pred[mask_y]
         masked_logits = masked_logits[mask_y]
 
-        result = {'logits': masked_logits, 'pred': masked_pred, "labels":masked_y}
+        flat_preds = torch.argmax(masked_pred,dim=1)
+        #print(masked_pred.size(),pred, "PREDS")
+        #print(flat_preds.size(),flat_preds, "ARGMAX")
+        flat_preds = flat_preds.view(flat_preds.size(0),1)
+        #print(flat_preds.shape, flat_preds, "ARGMAX")
+        #print(masked_y.size(),masked_y,"Y")
+
+        #for x in flat_preds:
+        #    print(x)
+        #for x in masked_y:
+        #    print(x)
+        #0/0
+        result = {'logits': masked_logits, 'pred': masked_pred, "labels":masked_y, "flat_pred":flat_preds}
 
         # compute loss
         if y is not None:
             # while mathematically the CrossEntropyLoss takes as input the probability distributions,
             # torch optimizes its computation internally and takes as input the logits instead
-            loss = self.loss_fn(logits, y)
+            loss = self.loss_fn(masked_logits, masked_y)
             result['loss'] = loss
 
         return result
@@ -471,7 +490,7 @@ class StudentModel(pl.LightningModule):
             batch_idx: int
     ) -> torch.Tensor:
         forward_output = self.forward(*batch)
-        self.f1(forward_output['pred'], forward_output["labels"])
+        self.f1(forward_output['flat_pred'], forward_output["labels"])
 
         self.log('train_f1', self.f1, prog_bar=True)
         self.log('train_loss', forward_output['loss'], prog_bar=True)
@@ -483,8 +502,7 @@ class StudentModel(pl.LightningModule):
             batch_idx: int
     ):
         forward_output = self.forward(*batch)
-
-        self.f1(forward_output['pred'], forward_output["labels"])
+        self.f1(forward_output['flat_pred'], forward_output["labels"])
 
         self.log('val_f1', self.f1, prog_bar=True)
         self.log('val_loss', forward_output['loss'], prog_bar=True)
@@ -495,7 +513,7 @@ class StudentModel(pl.LightningModule):
             batch_idx: int
     ):
         forward_output = self.forward(*batch)
-        self.f1(forward_output['pred'], forward_output["labels"])
+        self.f1(forward_output['flat_pred'], forward_output["labels"])
         self.log('test_f1', self.f1, prog_bar=True)
 
     def loss(self, pred, y):
@@ -503,7 +521,7 @@ class StudentModel(pl.LightningModule):
 
     def configure_optimizers(self):
         #optimizer = torch.optim.SGD(self.parameters(), lr=0.1, momentum=0.0)
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.001,weight_decay=0.000)  # instantiating the optimizer
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.1,weight_decay=0.000)  # instantiating the optimizer
         return optimizer
 
 
