@@ -22,7 +22,7 @@ import logging
 #logging.basicConfig(level=logging.INFO)
 
 import matplotlib.pyplot as plt
-
+nltk.download('averaged_perceptron_tagger')
 # seeds for reproducibility
 torch.manual_seed(42)
 np.random.seed(42)
@@ -51,6 +51,7 @@ UNK_TOKEN = '<unk>'
 PAD_TOKEN = '<pad>'
 EN_TRAIN_PATH = "./../../data/EN/train.json"
 EN_DEV_PATH = "./../../data/EN/dev.json"
+BERT_PATH = "./../../model/bert-base-cased"
 print(torch.version.cuda)
 
 SEMANTIC_ROLES = ["AGENT", "ASSET", "ATTRIBUTE", "BENEFICIARY", "CAUSE", "CO_AGENT", "CO_PATIENT", "CO_THEME",
@@ -84,13 +85,19 @@ class SentenceDataset(Dataset):
             with open(sentences_path) as file:
                 json_file = json.load(file)
         else:
-            json_file = sentences_plain
+            json_file = {0:sentences_plain}
         for key in json_file:
             # count = json_file[key]["predicates"].count("_")
             # length = len(json_file[key]["predicates"])
             json_file[key]["id"] = key
-            #####if self.test: json_file[key]["roles"] = {key:[0]*len(json_file[key]["words"])}  #TODO find a solution for this
-            if json_file[key]["predicates"].count("_") != len(json_file[key]["predicates"]) and len(json_file[key]["roles"]) > 1:
+            if self.test:
+                json_file[key]["roles"] = {}
+                for idx,predicate in enumerate(json_file[key]["predicates"]):
+                    if predicate != "_":
+                        json_file[key]["roles"] = {idx:["_"]*(idx)+["_"]*(len(json_file[key]["predicates"])-idx)}  #TODO find a solution for this
+                if not json_file[key]["roles"]:
+                    json_file[key]["roles"] = ["_" for i in range(len(json_file[key]["predicates"]))]
+            if json_file[key]["predicates"].count("_") != len(json_file[key]["predicates"]):# and len(json_file[key]["roles"]) > 1:
                 for position in json_file[key]["roles"]:
                     instance = copy.deepcopy(json_file[key])
                     roles = json_file[key]["roles"][position]
@@ -106,7 +113,7 @@ class SentenceDataset(Dataset):
                     start = max(0,int(position)-10)
                     stop = min(len(roles),int(position)+10)
                     for i in range(start,stop): instance["around_predicate"][i] = 1
-                    instance["around_predicate"][max([int(position)-10,0]):min([int(position)+10,len(roles)])] = [1]*21
+                    #instance["around_predicate"][max([int(position)-10,0]):min([int(position)+10,len(roles)])] = [1]*20
                     sentences.append(self.text_preprocess(instance))
             else:
                 instance = copy.deepcopy(json_file[key])
@@ -139,7 +146,8 @@ class SentenceDataset(Dataset):
         return sentence
 
     def bert_preprocess(self,sentences):    #TODO tokenize with bert
-        tokenizer = BertTokenizer.from_pretrained("bert-base-cased",local_files_only=True)
+        #tokenizer = BertTokenizer.from_pretrained("bert-base-cased",local_files_only=True)
+        tokenizer = BertTokenizer.from_pretrained(BERT_PATH, local_files_only=True)
         for sentence in sentences:
             text = "[CLS] "+ " ".join(sentence["words"])+" [SEP]"
             non_joined_text = ["[CLS]"]+sentence["words"]+["[SEP]"]
@@ -196,7 +204,7 @@ class SentenceDataset(Dataset):
 
     # custom dataloader which incorporates the collate function
     def dataloader(self, batch_size, shuffle=False):
-        return DataLoader(self, batch_size=batch_size, collate_fn=partial(self.collate))
+        return DataLoader(self, batch_size=batch_size, collate_fn=partial(self.collate), shuffle=shuffle)
 
     # function to map each lemma,pos in a sentence to their indexes
     def sent2idx(self, sent, word2idx):
@@ -313,18 +321,19 @@ class StudentModel(pl.LightningModule):                                 #TODO th
             nn.Dropout(p),
             nn.Linear(hidden2, num_classes)
         )
+
         # load the specific model for the input language
         self.language = language
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=0)
-        self.f1 = torchmetrics.classification.F1Score(num_classes=num_classes).to(device)
+        self.f1 = torchmetrics.classification.F1Score(num_classes=num_classes,ignore_index=0).to(device)
         self.f1_per_class = torchmetrics.classification.F1Score(num_classes=num_classes,average=None).to(device)
-        self.bert = BertModel.from_pretrained("bert-base-cased",local_files_only=True,output_hidden_states=True, is_decoder=True,
+        self.bert = BertModel.from_pretrained(BERT_PATH,local_files_only=True,output_hidden_states=True, is_decoder=True,
                                               add_cross_attention=True)
         #self.bert.eval()
     # forward method, automatically called when calling the instance
     # it takes the input tokens'indices, the labels'indices and the PoS tags'indices linked to input tokens
     def forward(self, X,X_len,segment_ids,y,predicate_position,attention_mask,around_predicate, ids):           #TODO highligt the predicate
-        outputs = self.bert(input_ids=X,token_type_ids=segment_ids,attention_mask=attention_mask)
+        outputs = self.bert(input_ids=X,token_type_ids=segment_ids,attention_mask=around_predicate)
         hidden_states = outputs[2]
         token_embeddings = torch.stack(hidden_states, dim=0)
         token_embeddings = torch.reshape(token_embeddings,shape=(token_embeddings.size(0),token_embeddings.size(1)*
@@ -365,15 +374,17 @@ class StudentModel(pl.LightningModule):                                 #TODO th
         logits = out
         y = y.view(-1)
         pred = torch.softmax(out, dim=-1)
-        masked_around_y = y[attention_mask.view(-1)]
-        masked_around_pred = pred[attention_mask.view(-1)]
-        masked_around_logits = logits[attention_mask.view(-1)]
-
-        mask = (masked_around_y != 0) & (masked_around_y != 28)
-        masked_y = masked_around_y[mask]
-        masked_pred = masked_around_pred[mask]
-        masked_logits = masked_around_logits[mask]
-
+        #'''
+        mask = around_predicate.view(-1)
+        masked_around_y = y[mask]
+        masked_around_pred = pred[mask]
+        masked_around_logits = logits[mask]
+        '''
+        mask = (y != 0) & (y != 28)
+        masked_y = y[mask]
+        masked_pred = pred[mask]
+        masked_logits = logits[mask]
+        '''
         flat_preds = torch.argmax(pred,dim=1)
         #print(masked_pred.size(),pred, "PREDS")
         #print(flat_preds.size(),flat_preds, "ARGMAX")
@@ -386,7 +397,7 @@ class StudentModel(pl.LightningModule):                                 #TODO th
         #for x in masked_y:
         #    print(x)
         #0/0
-        result = {'logits': logits, 'pred': pred, "labels":y, "flat_pred":flat_preds}
+        result = {'logits': logits, 'pred': pred, "labels":y, "flat_pred":flat_preds, "mask":mask}
 
         # compute loss
         if y is not None:
@@ -404,11 +415,11 @@ class StudentModel(pl.LightningModule):                                 #TODO th
     ) -> torch.Tensor:
         forward_output = self.forward(*batch)
         self.f1(forward_output['flat_pred'], forward_output["labels"])
-        print("\n TRAINING F1 PER CLASS: ",self.f1_per_class(forward_output['flat_pred'], forward_output["labels"]))
-        self.log('train_f1', self.f1, prog_bar=True,on_epoch=True)
+        #print("\n TRAINING F1 PER CLASS: ",self.f1_per_class(forward_output['flat_pred'], forward_output["labels"]))
+        self.log('train_f1', self.f1, prog_bar=True)
 
         #self.log('train_f1_per_class', self.f1_per_class, prog_bar=True)
-        self.log('train_loss', forward_output['loss'], prog_bar=True)
+        self.log('train_loss', forward_output['loss'],prog_bar=True)
         return forward_output['loss']
 
     def validation_step(
@@ -418,12 +429,12 @@ class StudentModel(pl.LightningModule):                                 #TODO th
     ):
         forward_output = self.forward(*batch)
         self.f1(forward_output['flat_pred'], forward_output["labels"])
-        print("\n VALIDATION F1 PER CLASS: ",self.f1_per_class(forward_output['flat_pred'], forward_output["labels"]))
+        #print("\n VALIDATION F1 PER CLASS: ",self.f1_per_class(forward_output['flat_pred'], forward_output["labels"]))
 
 
-        self.log('val_f1', self.f1, prog_bar=True,on_epoch=True)
+        self.log('val_f1', self.f1, prog_bar=True)
         #self.log('val_f1_per_class', self.f1_per_class, prog_bar=True)
-        self.log('val_loss', forward_output['loss'], prog_bar=True)
+        self.log('val_loss', forward_output['loss'],prog_bar=True)
 
     def test_step(
             self,
@@ -432,7 +443,7 @@ class StudentModel(pl.LightningModule):                                 #TODO th
     ):
         forward_output = self.forward(*batch)
         self.f1(forward_output['flat_pred'], forward_output["labels"])
-        self.log('test_f1', self.f1, prog_bar=True)
+        self.log('test_f1', self.f1)
 
     def loss(self, pred, y):
         return self.loss_fn(pred, y)
@@ -488,24 +499,30 @@ class StudentModel(pl.LightningModule):                                 #TODO th
                         "roles": dictionary of lists, # A list of roles for each predicate (index) you identify in the sentence.
                     }
         """
-        sentences = SentenceDataset(sentences=sentence)
+        sentences = SentenceDataset(sentences=sentence,test=True)
         batches = sentences.dataloader(shuffle=False,batch_size=32)
         out = {
             "roles":{}
         }
         for batch in batches:
             X, X_len, segment_ids, y, predicate_position, attention_mask, around_predicate, ids = batch
-            roles = self.forward(X,X_len,segment_ids,y,predicate_position,attention_mask,around_predicate, ids)
-            preds = roles["flat_pred"].view(X.size(0),-1)
+            output = self.forward(X,X_len,segment_ids,y,predicate_position,attention_mask,around_predicate, ids)
+            preds = output["flat_pred"].view(X.size(0),-1)
+            masks = output["mask"].view(X.size(0),-1)
+            n_values = X.size(0)*X.size(1)
+            reconstructed = torch.tensor([28]*n_values,dtype=torch.long, device=device).view(X.size(0),X.size(1))
+               # torch.zeros(size=X.size(),dtype=torch.long,device=device)
+            #reconstructed[masks] = preds
+            reconstructed = preds
             for idx,position in enumerate(predicate_position):
-                out["roles"][position.item()] = [sentences.idx2roles[role.item()] for role in torch.flatten(preds[idx])]
+                out["roles"][position.item()] = [sentences.idx2roles[role.item()] for role in torch.flatten(reconstructed[idx])]
 
         return out
 
 
 early_stopping = pl.callbacks.EarlyStopping(
     monitor='val_f1',  # the value that will be evaluated to activate the early stopping of the model.
-    patience=10,  # the number of consecutive attempts that the model has to raise (or lower depending on the metric used) to raise the "monitor" value.
+    patience=5,  # the number of consecutive attempts that the model has to raise (or lower depending on the metric used) to raise the "monitor" value.
     verbose=True,  # whether to log or not information in the console.
     mode='max', # wheter we want to maximize (max) or minimize the "monitor" value.
 )
@@ -513,310 +530,36 @@ early_stopping = pl.callbacks.EarlyStopping(
 check_point_callback = pl.callbacks.ModelCheckpoint(
     monitor='val_f1',  # the value that we want to use for model selection.
     verbose=True,  # whether to log or not information in the console.
-    save_top_k=3,  # the number of checkpoints we want to store.
+    save_top_k=1,  # the number of checkpoints we want to store.
     mode='max',  # wheter we want to maximize (max) or minimize the "monitor" value.
     filename='{epoch}-{val_f1:.4f}'  # the prefix on the checkpoint values. Metrics store by the trainer can be used to dynamically change the name.
 )
-'''
+#'''
 sentences_dm = SentencesDataModule(
     data_train_path=EN_TRAIN_PATH,
     data_dev_path=EN_DEV_PATH,
     data_test_path=EN_DEV_PATH,
     batch_size=32
 )
-'''
+#'''
 classifier = StudentModel(language="en",hidden1=768,lstm_layers=1,bidirectional=False,p=0.0)
 
 
 # the PyTorch Lightning Trainer
 trainer = pl.Trainer(
-    max_epochs=5,  # maximum number of epochs.
+    max_epochs=20,  # maximum number of epochs.
     gpus=1,  # the number of gpus we have at our disposal.
     callbacks=[early_stopping, check_point_callback]  # the callback we want our trainer to use.
 )
 
 # and finally we can let the "trainer" fit the amazon reviews classifier.
-#trainer.fit(model=classifier, datamodule=sentences_dm)
+trainer.fit(model=classifier, datamodule=sentences_dm)
 
-dummy = {
-    "1996/a/50/18_supp__437:1": {
-        "dependency_heads": [
-            2,
-            3,
-            0,
-            8,
-            7,
-            7,
-            8,
-            3,
-            10,
-            8,
-            12,
-            8,
-            14,
-            12,
-            19,
-            19,
-            18,
-            19,
-            14,
-            21,
-            19,
-            24,
-            24,
-            19,
-            27,
-            27,
-            19,
-            3
-        ],
-        "dependency_relations": [
-            "det",
-            "nsubj",
-            "root",
-            "mark",
-            "det",
-            "compound",
-            "nsubj",
-            "ccomp",
-            "amod",
-            "obj",
-            "mark",
-            "advcl",
-            "det",
-            "obj",
-            "case",
-            "det",
-            "compound",
-            "compound",
-            "nmod",
-            "punct",
-            "conj",
-            "cc",
-            "amod",
-            "conj",
-            "case",
-            "amod",
-            "nmod",
-            "punct"
-        ],
-        "lemmas": [
-            "the",
-            "committee",
-            "recommend",
-            "that",
-            "the",
-            "State",
-            "party",
-            "pay",
-            "more",
-            "attention",
-            "to",
-            "sensitize",
-            "the",
-            "member",
-            "of",
-            "the",
-            "law",
-            "enforcement",
-            "agency",
-            ",",
-            "security",
-            "and",
-            "armed",
-            "force",
-            "about",
-            "human",
-            "rights",
-            "."
-        ],
-        "pos_tags": [
-            "DET",
-            "PROPN",
-            "VERB",
-            "SCONJ",
-            "DET",
-            "PROPN",
-            "NOUN",
-            "VERB",
-            "ADJ",
-            "NOUN",
-            "SCONJ",
-            "VERB",
-            "DET",
-            "NOUN",
-            "ADP",
-            "DET",
-            "NOUN",
-            "NOUN",
-            "NOUN",
-            "PUNCT",
-            "NOUN",
-            "CCONJ",
-            "ADJ",
-            "NOUN",
-            "ADP",
-            "ADJ",
-            "NOUN",
-            "PUNCT"
-        ],
-        "predicates": [
-            "_",
-            "_",
-            "PROPOSE",
-            "_",
-            "_",
-            "_",
-            "_",
-            "GIVE_GIFT",
-            "_",
-            "_",
-            "_",
-            "TEACH",
-            "_",
-            "_",
-            "_",
-            "_",
-            "_",
-            "_",
-            "_",
-            "_",
-            "_",
-            "_",
-            "_",
-            "_",
-            "_",
-            "_",
-            "_",
-            "_"
-        ],
-        "roles": {
-            "2": [
-                "_",
-                "agent",
-                "_",
-                "topic",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_"
-            ],
-            "7": [
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "agent",
-                "_",
-                "_",
-                "theme",
-                "recipient",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_"
-            ],
-            "11": [
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "agent",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "recipient",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "_",
-                "topic",
-                "_",
-                "_",
-                "_"
-            ]
-        },
-        "words": [
-            "The",
-            "Committee",
-            "recommends",
-            "that",
-            "the",
-            "State",
-            "party",
-            "pay",
-            "more",
-            "attention",
-            "to",
-            "sensitizing",
-            "the",
-            "members",
-            "of",
-            "the",
-            "law",
-            "enforcement",
-            "agencies",
-            ",",
-            "security",
-            "and",
-            "armed",
-            "forces",
-            "about",
-            "human",
-            "rights",
-            "."
-        ]
-    }}
 
 model_path = "../../model/model.ckpt"
 loaded = StudentModel.load_from_checkpoint(model_path,language="en").to(device)
-print(loaded.predict(dummy))
+
+
 
 def read_dataset(path: str):
     with open(path) as f:
@@ -844,4 +587,76 @@ def read_dataset(path: str):
     return sentences, labels
 
 sentences,labels = read_dataset(EN_DEV_PATH)
-SentenceDataset(sentences=sentences,test=True)
+for key in sentences:
+    print(loaded.predict(sentences[key]))
+
+def evaluate_argument_identification(labels, predictions, null_tag="_"):
+    true_positives, false_positives, false_negatives = 0, 0, 0
+    for sentence_id in labels:
+        gold = labels[sentence_id]["roles"]
+        pred = predictions[sentence_id]["roles"]
+        predicate_indices = set(gold.keys()).union(pred.keys())
+        for idx in predicate_indices:
+            if idx in gold and idx not in pred:
+                false_negatives += sum(1 for role in gold[idx] if role != null_tag)
+            elif idx in pred and idx not in gold:
+                false_positives += sum(1 for role in pred[idx] if role != null_tag)
+            else:  # idx in both gold and pred
+                for r_g, r_p in zip(gold[idx], pred[idx]):
+                    if r_g != null_tag and r_p != null_tag:
+                        true_positives += 1
+                    elif r_g != null_tag and r_p == null_tag:
+                        false_negatives += 1
+                    elif r_g == null_tag and r_p != null_tag:
+                        false_positives += 1
+
+    precision = true_positives / (true_positives + false_positives)
+    recall = true_positives / (true_positives + false_negatives)
+    f1 = 2 * (precision * recall) / (precision + recall)
+    return {
+        "true_positives": true_positives,
+        "false_positives": false_positives,
+        "false_negatives": false_negatives,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+    }
+
+
+def evaluate_argument_classification(labels, predictions, null_tag="_"):
+    true_positives, false_positives, false_negatives = 0, 0, 0
+    for sentence_id in labels:
+        gold = labels[sentence_id]["roles"]
+        pred = predictions[sentence_id]["roles"]
+        predicate_indices = set(gold.keys()).union(pred.keys())
+
+        for idx in predicate_indices:
+            if idx in gold and idx not in pred:
+                false_negatives += sum(1 for role in gold[idx] if role != null_tag)
+            elif idx in pred and idx not in gold:
+                false_positives += sum(1 for role in pred[idx] if role != null_tag)
+            else:  # idx in both gold and pred
+                for r_g, r_p in zip(gold[idx], pred[idx]):
+                    if r_g != null_tag and r_p != null_tag:
+                        if r_g == r_p:
+                            true_positives += 1
+                        else:
+                            false_positives += 1
+                            false_negatives += 1
+                    elif r_g != null_tag and r_p == null_tag:
+                        false_negatives += 1
+                    elif r_g == null_tag and r_p != null_tag:
+                        false_positives += 1
+
+    precision = true_positives / (true_positives + false_positives)
+    recall = true_positives / (true_positives + false_negatives)
+    f1 = 2 * (precision * recall) / (precision + recall)
+    return {
+        "true_positives": true_positives,
+        "false_positives": false_positives,
+        "false_negatives": false_negatives,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+    }
+

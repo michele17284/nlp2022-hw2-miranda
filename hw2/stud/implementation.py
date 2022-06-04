@@ -14,7 +14,9 @@ import pytorch_lightning as pl
 from transformers import BertTokenizer, BertModel
 import torch
 from torch.utils.data import DataLoader
+import nltk
 
+nltk.download('averaged_perceptron_tagger')
 from model import Model
 
 
@@ -22,6 +24,7 @@ PAD_TOKEN = '<pad>'
 #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 EN_TRAIN_PATH = "./../../data/EN/train.json"
 EN_DEV_PATH = "./../../data/EN/dev.json"
+BERT_PATH = "./model/bert-base-cased"
 
 def build_model_34(language: str, device: str) -> Model:
     """
@@ -153,7 +156,9 @@ class SentenceDataset(Dataset):
 
     def __init__(self, sentences_path=None, sentences=None, lemmatization=False,
                  test=False):
+        self.test = test
         self.sentences = self.read_sentences(sentences_path=sentences_path,sentences_plain=sentences)
+
         self.bert_preprocess(self.sentences)
         self.SEMANTIC_ROLES = ["<pad>","AGENT", "ASSET", "ATTRIBUTE", "BENEFICIARY", "CAUSE", "CO-AGENT", "CO-PATIENT",
                                "CO-THEME", "DESTINATION",
@@ -171,13 +176,21 @@ class SentenceDataset(Dataset):
             with open(sentences_path) as file:
                 json_file = json.load(file)
         else:
-            json_file = sentences_plain
+            json_file = {0: sentences_plain}
         for key in json_file:
             # count = json_file[key]["predicates"].count("_")
             # length = len(json_file[key]["predicates"])
-            print(json_file)
             json_file[key]["id"] = key
-            if json_file[key]["predicates"].count("_") != len(json_file[key]["predicates"]): #and len(json_file[key]["roles"]) > 1:
+            if self.test:
+                json_file[key]["roles"] = {}
+                for idx, predicate in enumerate(json_file[key]["predicates"]):
+                    if predicate != "_":
+                        json_file[key]["roles"] = {idx: ["_"] * (idx) + ["_"] * (
+                                    len(json_file[key]["predicates"]) - idx)}  # TODO find a solution for this
+                if not json_file[key]["roles"]:
+                    json_file[key]["roles"] = ["_" for i in range(len(json_file[key]["predicates"]))]
+            if json_file[key]["predicates"].count("_") != len(
+                    json_file[key]["predicates"]):  # and len(json_file[key]["roles"]) > 1:
                 for position in json_file[key]["roles"]:
                     instance = copy.deepcopy(json_file[key])
                     roles = json_file[key]["roles"][position]
@@ -188,12 +201,12 @@ class SentenceDataset(Dataset):
                     instance["predicate_position"] = int(position)
                     # instance["roles_bin"] = [1 if role != "_" else 0 for role in roles]
                     instance["predicates"] = predicates
-                    instance["attention_mask"] = [1]*len(roles)
-                    instance["around_predicate"] = [0]*len(roles)
-                    start = max(0,int(position)-10)
-                    stop = min(len(roles),int(position)+10)
-                    for i in range(start,stop): instance["around_predicate"][i] = 1
-                    instance["around_predicate"][max([int(position)-10,0]):min([int(position)+10,len(roles)])] = [1]*21
+                    instance["attention_mask"] = [1] * len(roles)
+                    instance["around_predicate"] = [0] * len(roles)
+                    start = max(0, int(position) - 10)
+                    stop = min(len(roles), int(position) + 10)
+                    for i in range(start, stop): instance["around_predicate"][i] = 1
+                    #instance["around_predicate"][max([int(position) - 10, 0]):min([int(position) + 10, len(roles)])] = [1] * 20
                     sentences.append(self.text_preprocess(instance))
             else:
                 instance = copy.deepcopy(json_file[key])
@@ -226,7 +239,7 @@ class SentenceDataset(Dataset):
         return sentence
 
     def bert_preprocess(self,sentences):    #TODO tokenize with bert
-        tokenizer = BertTokenizer.from_pretrained("bert-base-cased")
+        tokenizer = BertTokenizer.from_pretrained(BERT_PATH,local_files_only=True)
         for sentence in sentences:
             text = "[CLS] "+ " ".join(sentence["words"])+" [SEP]"
             non_joined_text = ["[CLS]"]+sentence["words"]+["[SEP]"]
@@ -313,6 +326,7 @@ class SentenceDataset(Dataset):
         return X, X_len, segment_ids, y, predicate_position,attention_mask, around_predicate,ids
 
 
+
 class SentencesDataModule(pl.LightningDataModule):
 
     def __init__(
@@ -384,9 +398,10 @@ class StudentModel(Model,pl.LightningModule):
         # load the specific model for the input language
         self.language = language
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=0)
-        self.f1 = torchmetrics.classification.F1Score(num_classes=num_classes)
+        self.f1 = torchmetrics.classification.F1Score(num_classes=num_classes, ignore_index=0)
         self.f1_per_class = torchmetrics.classification.F1Score(num_classes=num_classes, average=None)
-        self.bert = BertModel.from_pretrained("bert-base-cased", output_hidden_states=True, is_decoder=True,
+        self.bert = BertModel.from_pretrained(BERT_PATH, local_files_only=True, output_hidden_states=True,
+                                              is_decoder=True,
                                               add_cross_attention=True)
         # self.bert.eval()
 
@@ -394,7 +409,7 @@ class StudentModel(Model,pl.LightningModule):
     # it takes the input tokens'indices, the labels'indices and the PoS tags'indices linked to input tokens
     def forward(self, X, X_len, segment_ids, y, predicate_position, attention_mask, around_predicate,
                 ids):  # TODO highligt the predicate
-        outputs = self.bert(input_ids=X, token_type_ids=segment_ids, attention_mask=attention_mask)
+        outputs = self.bert(input_ids=X, token_type_ids=segment_ids, attention_mask=around_predicate)
         hidden_states = outputs[2]
         token_embeddings = torch.stack(hidden_states, dim=0)
         token_embeddings = torch.reshape(token_embeddings, shape=(token_embeddings.size(0), token_embeddings.size(1) *
@@ -435,15 +450,17 @@ class StudentModel(Model,pl.LightningModule):
         logits = out
         y = y.view(-1)
         pred = torch.softmax(out, dim=-1)
-        masked_around_y = y[attention_mask.view(-1)]
-        masked_around_pred = pred[attention_mask.view(-1)]
-        masked_around_logits = logits[attention_mask.view(-1)]
-
-        mask = (masked_around_y != 0) & (masked_around_y != 28)
-        masked_y = masked_around_y[mask]
-        masked_pred = masked_around_pred[mask]
-        masked_logits = masked_around_logits[mask]
-
+        # '''
+        mask = around_predicate.view(-1)
+        masked_around_y = y[mask]
+        masked_around_pred = pred[mask]
+        masked_around_logits = logits[mask]
+        '''
+        mask = (y != 0) & (y != 28)
+        masked_y = y[mask]
+        masked_pred = pred[mask]
+        masked_logits = logits[mask]
+        '''
         flat_preds = torch.argmax(pred, dim=1)
         # print(masked_pred.size(),pred, "PREDS")
         # print(flat_preds.size(),flat_preds, "ARGMAX")
@@ -456,7 +473,7 @@ class StudentModel(Model,pl.LightningModule):
         # for x in masked_y:
         #    print(x)
         # 0/0
-        result = {'logits': logits, 'pred': pred, "labels": y, "flat_pred": flat_preds}
+        result = {'logits': logits, 'pred': pred, "labels": y, "flat_pred": flat_preds, "mask": mask}
 
         # compute loss
         if y is not None:
@@ -474,11 +491,11 @@ class StudentModel(Model,pl.LightningModule):
     ) -> torch.Tensor:
         forward_output = self.forward(*batch)
         self.f1(forward_output['flat_pred'], forward_output["labels"])
-        print("\n TRAINING F1 PER CLASS: ", self.f1_per_class(forward_output['flat_pred'], forward_output["labels"]))
-        self.log('train_f1', self.f1, prog_bar=True, on_epoch=True)
+        # print("\n TRAINING F1 PER CLASS: ",self.f1_per_class(forward_output['flat_pred'], forward_output["labels"]))
+        self.log('train_f1', self.f1, prog_bar=True)
 
         # self.log('train_f1_per_class', self.f1_per_class, prog_bar=True)
-        self.log('train_loss', forward_output['loss'], prog_bar=True)
+        self.log('train_loss', forward_output['loss'])
         return forward_output['loss']
 
     def validation_step(
@@ -488,11 +505,11 @@ class StudentModel(Model,pl.LightningModule):
     ):
         forward_output = self.forward(*batch)
         self.f1(forward_output['flat_pred'], forward_output["labels"])
-        print("\n VALIDATION F1 PER CLASS: ", self.f1_per_class(forward_output['flat_pred'], forward_output["labels"]))
+        # print("\n VALIDATION F1 PER CLASS: ",self.f1_per_class(forward_output['flat_pred'], forward_output["labels"]))
 
-        self.log('val_f1', self.f1, prog_bar=True, on_epoch=True)
+        self.log('val_f1', self.f1, prog_bar=True)
         # self.log('val_f1_per_class', self.f1_per_class, prog_bar=True)
-        self.log('val_loss', forward_output['loss'], prog_bar=True)
+        self.log('val_loss', forward_output['loss'])
 
     def test_step(
             self,
@@ -501,7 +518,7 @@ class StudentModel(Model,pl.LightningModule):
     ):
         forward_output = self.forward(*batch)
         self.f1(forward_output['flat_pred'], forward_output["labels"])
-        self.log('test_f1', self.f1, prog_bar=True)
+        self.log('test_f1', self.f1)
 
     def loss(self, pred, y):
         return self.loss_fn(pred, y)
@@ -557,18 +574,27 @@ class StudentModel(Model,pl.LightningModule):
                         "roles": dictionary of lists, # A list of roles for each predicate (index) you identify in the sentence.
                     }
         """
-        sentences = SentenceDataset(sentences=sentence)
+        sentences = SentenceDataset(sentences=sentence, test=True)
         batches = sentences.dataloader(shuffle=False, batch_size=32)
         out = {
             "roles": {}
         }
         for batch in batches:
             X, X_len, segment_ids, y, predicate_position, attention_mask, around_predicate, ids = batch
-            roles = self.forward(X, X_len, segment_ids, y, predicate_position, attention_mask, around_predicate, ids)
-            preds = roles["flat_pred"].view(X.size(0), -1)
+            output = self.forward(X, X_len, segment_ids, y, predicate_position, attention_mask, around_predicate, ids)
+            preds = output["flat_pred"].view(X.size(0), -1)
+            masks = output["mask"].view(X.size(0), -1)
+            n_values = X.size(0) * X.size(1)
+            reconstructed = torch.tensor([28] * n_values, dtype=torch.long).view(X.size(0),X.size(1))
+            #reconstructed[masks] = preds
+            reconstructed = preds
             for idx, position in enumerate(predicate_position):
-                out["roles"][position.item()] = [sentences.idx2roles[role.item()] for role in torch.flatten(preds[idx])]
+                out["roles"][position.item()] = [sentences.idx2roles[role.item()] for role in
+                                                 torch.flatten(reconstructed[idx])]
+                print("FORWARD OUTPUT CONVERTED",out["roles"][position.item()])
+                print("GROUND TRUTH",y[idx])
 
+        print("OUT",out)
         return out
 
 
