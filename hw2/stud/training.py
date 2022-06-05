@@ -61,6 +61,76 @@ SEMANTIC_ROLES = ["AGENT", "ASSET", "ATTRIBUTE", "BENEFICIARY", "CAUSE", "CO_AGE
                   "RECIPIENT", "RESULT", "SOURCE", "STIMULUS", "THEME", "TIME", "TOPIC", "VALUE","_"]
 
 
+def evaluate_argument_identification(labels, predictions, null_tag=28):
+    true_positives, false_positives, false_negatives = 0, 0, 0
+    for sentence_id in labels:
+        gold = labels[sentence_id]["roles"]
+        pred = predictions[sentence_id]["roles"]
+        predicate_indices = set(gold.keys()).union(pred.keys())
+        for idx in predicate_indices:
+            if idx in gold and idx not in pred:
+                false_negatives += sum(1 for role in gold[idx] if role != null_tag)
+            elif idx in pred and idx not in gold:
+                false_positives += sum(1 for role in pred[idx] if role != null_tag)
+            else:  # idx in both gold and pred
+                for r_g, r_p in zip(gold[idx], pred[idx]):
+                    if r_g != null_tag and r_p != null_tag:
+                        true_positives += 1
+                    elif r_g != null_tag and r_p == null_tag:
+                        false_negatives += 1
+                    elif r_g == null_tag and r_p != null_tag:
+                        false_positives += 1
+
+    precision = true_positives / (true_positives + false_positives)
+    recall = true_positives / (true_positives + false_negatives)
+    f1 = 2 * (precision * recall) / (precision + recall)
+    return {
+        "true_positives": true_positives,
+        "false_positives": false_positives,
+        "false_negatives": false_negatives,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+    }
+
+
+def evaluate_argument_classification(labels, predictions, null_tag=28):
+    true_positives, false_positives, false_negatives = 0, 0, 0
+    for sentence_id in labels:
+        gold = labels[sentence_id]["roles"]
+        pred = predictions[sentence_id]["roles"]
+        predicate_indices = set(gold.keys()).union(pred.keys())
+
+        for idx in predicate_indices:
+            if idx in gold and idx not in pred:
+                false_negatives += sum(1 for role in gold[idx] if role != null_tag)
+            elif idx in pred and idx not in gold:
+                false_positives += sum(1 for role in pred[idx] if role != null_tag)
+            else:  # idx in both gold and pred
+                for r_g, r_p in zip(gold[idx], pred[idx]):
+                    if r_g != null_tag and r_p != null_tag:
+                        if r_g == r_p:
+                            true_positives += 1
+                        else:
+                            false_positives += 1
+                            false_negatives += 1
+                    elif r_g != null_tag and r_p == null_tag:
+                        false_negatives += 1
+                    elif r_g == null_tag and r_p != null_tag:
+                        false_positives += 1
+
+    precision = true_positives / (true_positives + false_positives)
+    recall = true_positives / (true_positives + false_negatives)
+    f1 = 2 * (precision * recall) / (precision + recall)
+    return {
+        "true_positives": true_positives,
+        "false_positives": false_positives,
+        "false_negatives": false_negatives,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+    }
+
 class SentenceDataset(Dataset):
 
     def __init__(self, sentences_path=None, sentences=None, lemmatization=False,
@@ -397,7 +467,8 @@ class StudentModel(pl.LightningModule):                                 #TODO th
         #for x in masked_y:
         #    print(x)
         #0/0
-        result = {'logits': logits, 'pred': pred, "labels":y, "flat_pred":flat_preds, "mask":mask}
+        result = {'logits': logits, 'pred': pred, "labels":y, "flat_pred":flat_preds, "mask":mask,
+                  "predicate_position":predicate_position, }
 
         # compute loss
         if y is not None:
@@ -431,7 +502,15 @@ class StudentModel(pl.LightningModule):                                 #TODO th
         self.f1(forward_output['flat_pred'], forward_output["labels"])
         #print("\n VALIDATION F1 PER CLASS: ",self.f1_per_class(forward_output['flat_pred'], forward_output["labels"]))
 
-
+        predicate_position = forward_output["predicate_position"]
+        preds = forward_output["flat_pred"].view(predicate_position.size(0), -1)
+        labels = forward_output["labels"].view(predicate_position.size(0), -1)
+        converted_preds = dict()
+        converted_labels = dict()
+        for idx, position in enumerate(predicate_position):
+            converted_preds[idx] = {"roles": {position: preds[idx]}}
+            converted_labels[idx] = {"roles": {position: labels[idx]}}
+        print(evaluate_argument_classification(converted_labels, converted_preds))
         self.log('val_f1', self.f1, prog_bar=True)
         #self.log('val_f1_per_class', self.f1_per_class, prog_bar=True)
         self.log('val_loss', forward_output['loss'],prog_bar=True)
@@ -590,73 +669,5 @@ sentences,labels = read_dataset(EN_DEV_PATH)
 for key in sentences:
     print(loaded.predict(sentences[key]))
 
-def evaluate_argument_identification(labels, predictions, null_tag="_"):
-    true_positives, false_positives, false_negatives = 0, 0, 0
-    for sentence_id in labels:
-        gold = labels[sentence_id]["roles"]
-        pred = predictions[sentence_id]["roles"]
-        predicate_indices = set(gold.keys()).union(pred.keys())
-        for idx in predicate_indices:
-            if idx in gold and idx not in pred:
-                false_negatives += sum(1 for role in gold[idx] if role != null_tag)
-            elif idx in pred and idx not in gold:
-                false_positives += sum(1 for role in pred[idx] if role != null_tag)
-            else:  # idx in both gold and pred
-                for r_g, r_p in zip(gold[idx], pred[idx]):
-                    if r_g != null_tag and r_p != null_tag:
-                        true_positives += 1
-                    elif r_g != null_tag and r_p == null_tag:
-                        false_negatives += 1
-                    elif r_g == null_tag and r_p != null_tag:
-                        false_positives += 1
 
-    precision = true_positives / (true_positives + false_positives)
-    recall = true_positives / (true_positives + false_negatives)
-    f1 = 2 * (precision * recall) / (precision + recall)
-    return {
-        "true_positives": true_positives,
-        "false_positives": false_positives,
-        "false_negatives": false_negatives,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-    }
-
-
-def evaluate_argument_classification(labels, predictions, null_tag="_"):
-    true_positives, false_positives, false_negatives = 0, 0, 0
-    for sentence_id in labels:
-        gold = labels[sentence_id]["roles"]
-        pred = predictions[sentence_id]["roles"]
-        predicate_indices = set(gold.keys()).union(pred.keys())
-
-        for idx in predicate_indices:
-            if idx in gold and idx not in pred:
-                false_negatives += sum(1 for role in gold[idx] if role != null_tag)
-            elif idx in pred and idx not in gold:
-                false_positives += sum(1 for role in pred[idx] if role != null_tag)
-            else:  # idx in both gold and pred
-                for r_g, r_p in zip(gold[idx], pred[idx]):
-                    if r_g != null_tag and r_p != null_tag:
-                        if r_g == r_p:
-                            true_positives += 1
-                        else:
-                            false_positives += 1
-                            false_negatives += 1
-                    elif r_g != null_tag and r_p == null_tag:
-                        false_negatives += 1
-                    elif r_g == null_tag and r_p != null_tag:
-                        false_positives += 1
-
-    precision = true_positives / (true_positives + false_positives)
-    recall = true_positives / (true_positives + false_negatives)
-    f1 = 2 * (precision * recall) / (precision + recall)
-    return {
-        "true_positives": true_positives,
-        "false_positives": false_positives,
-        "false_negatives": false_negatives,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-    }
 
