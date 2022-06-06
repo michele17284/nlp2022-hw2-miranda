@@ -145,6 +145,8 @@ class SentenceDataset(Dataset):
                                "PATIENT", "PRODUCT", "PURPOSE",
                                "RECIPIENT", "RESULT", "SOURCE", "STIMULUS", "THEME", "TIME", "TOPIC", "VALUE","_"]
         self.roles2idx = {role.lower(): idx for idx,role in enumerate(self.SEMANTIC_ROLES)}
+        self.roles2idx["<pred>"] = 0
+
         self.idx2roles = {idx: role.lower() for idx,role in enumerate(self.SEMANTIC_ROLES)}
 
     # little function to read and store a file given the path
@@ -164,7 +166,7 @@ class SentenceDataset(Dataset):
                 json_file[key]["roles"] = {}
                 for idx,predicate in enumerate(json_file[key]["predicates"]):
                     if predicate != "_":
-                        json_file[key]["roles"] = {idx:["_"]*(idx)+["_"]*(len(json_file[key]["predicates"])-idx)}  #TODO find a solution for this
+                        json_file[key]["roles"][idx] = ["_"]*(idx)+["_"]*(len(json_file[key]["predicates"])-idx)  #TODO find a solution for this
                 if not json_file[key]["roles"]:
                     json_file[key]["roles"] = ["_" for i in range(len(json_file[key]["predicates"]))]
             if json_file[key]["predicates"].count("_") != len(json_file[key]["predicates"]):# and len(json_file[key]["roles"]) > 1:
@@ -173,36 +175,45 @@ class SentenceDataset(Dataset):
                     roles = json_file[key]["roles"][position]
                     predicates = ["_" for i in range(len(roles))]
                     predicates[int(position)] = json_file[key]["predicates"][int(position)]
-
+                    predicates.insert(int(position),"<pred>")
+                    predicates.insert(int(position)+2,"<pred>")
+                    roles.insert(int(position), "<pred>")
+                    roles.insert(int(position) + 2, "<pred>")
                     instance["roles"] = roles
                     instance["predicate_position"] = int(position)
-                    # instance["roles_bin"] = [1 if role != "_" else 0 for role in roles]
                     instance["predicates"] = predicates
-                    instance["attention_mask"] = [1]*len(roles)
+                    attention_mask = [1]*len(roles)
+                    attention_mask[int(position)] = 0
+                    attention_mask[int(position)+2] = 0
+                    instance["attention_mask"] = attention_mask
+
+
                     instance["around_predicate"] = [0]*len(roles)
-                    start = max(0,int(position)-10)
-                    stop = min(len(roles),int(position)+10)
+                    start = max(0,int(position)-2)
+                    stop = min(len(roles),int(position)+4)
                     for i in range(start,stop): instance["around_predicate"][i] = 1
                     #instance["around_predicate"][max([int(position)-10,0]):min([int(position)+10,len(roles)])] = [1]*20
                     sentences.append(self.text_preprocess(instance))
             else:
                 instance = copy.deepcopy(json_file[key])
 
-                if json_file[key]["predicates"].count("_") == len(json_file[key]["predicates"]):
-                    instance["roles"] = ["_" for i in range(len(json_file[key]["predicates"]))]
-                    instance["predicate_position"] = -1
-                    instance["around_predicate"] = [0] * len(instance["roles"])
-                    # instance["roles_bin"] = [1 if role != "_" else 0 for role in roles]
+                #if json_file[key]["predicates"].count("_") == len(json_file[key]["predicates"]):
+                instance["roles"] = ["_" for i in range(len(json_file[key]["predicates"]))]
+                instance["predicate_position"] = -1
+                instance["around_predicate"] = [0] * len(instance["roles"])
+                # instance["roles_bin"] = [1 if role != "_" else 0 for role in roles]
+                '''
                 else:
                     k = list(instance["roles"].keys())[0]
                     instance["roles"] = instance["roles"][k]
                     instance["predicate_position"] = int(k)
                     instance["around_predicate"] = [0] * len(instance["roles"])
-                    start = max(0, int(k) - 10)
-                    stop = min(len(instance["roles"]), int(k) + 10)
+                    start = max(0, int(k) - 3)
+                    stop = min(len(instance["roles"]), int(k) + 3)
                     for i in range(start, stop): instance["around_predicate"][i] = 1
+                
+                '''
                 instance["attention_mask"] = [1] * len(instance["roles"])
-
                 sentences.append(self.text_preprocess(instance))
         return sentences
 
@@ -221,11 +232,9 @@ class SentenceDataset(Dataset):
         for sentence in sentences:
             text = "[CLS] "+ " ".join(sentence["words"])+" [SEP]"
             non_joined_text = ["[CLS]"]+sentence["words"]+["[SEP]"]
-            roles = ["<pad>"]+sentence["roles"]+["<pad>"]
-            tokenized = tokenizer.tokenize(text)
-            x_index, y_index = 1,1
-            tokenized_roles = ['<pad>']
-            tokenized_roles.append('<pad>')
+            if sentence["predicate_position"] != -1:
+                non_joined_text.insert(sentence["predicate_position"], "<pred>")
+                non_joined_text.insert(sentence["predicate_position"] + 2, "<pred>")
             encoded = tokenizer.convert_tokens_to_ids(non_joined_text)
             segments_ids = [1] * len(non_joined_text)
             sentence["segment_ids"] = segments_ids
@@ -233,6 +242,7 @@ class SentenceDataset(Dataset):
             sentence["tokenized_roles"] = ["<pad>"]+sentence["roles"]+["<pad>"]
             sentence["attention_mask"] = [0]+sentence["attention_mask"]+[0]
             sentence["around_predicate"] = [0]+sentence["around_predicate"]+[0]
+            #assert len(non_joined_text) == len(sentence["attention_mask"])
         return sentences
 
     def create_vocabulary(self, word_list):
@@ -396,14 +406,13 @@ class StudentModel(pl.LightningModule):                                 #TODO th
         self.language = language
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=0)
         self.f1 = torchmetrics.classification.F1Score(num_classes=num_classes,ignore_index=0).to(device)
-        self.f1_per_class = torchmetrics.classification.F1Score(num_classes=num_classes,average=None).to(device)
         self.bert = BertModel.from_pretrained(BERT_PATH,local_files_only=True,output_hidden_states=True, is_decoder=True,
                                               add_cross_attention=True)
         #self.bert.eval()
     # forward method, automatically called when calling the instance
     # it takes the input tokens'indices, the labels'indices and the PoS tags'indices linked to input tokens
     def forward(self, X,X_len,segment_ids,y,predicate_position,attention_mask,around_predicate, ids):           #TODO highligt the predicate
-        outputs = self.bert(input_ids=X,token_type_ids=segment_ids,attention_mask=around_predicate)
+        outputs = self.bert(input_ids=X,token_type_ids=segment_ids,attention_mask=attention_mask)
         hidden_states = outputs[2]
         token_embeddings = torch.stack(hidden_states, dim=0)
         token_embeddings = torch.reshape(token_embeddings,shape=(token_embeddings.size(0),token_embeddings.size(1)*
@@ -479,7 +488,7 @@ class StudentModel(pl.LightningModule):                                 #TODO th
 
         return result
 
-    def training_step(                                              #TODO understand why you don't get epoch-wise train F1
+    def training_step(
             self,
             batch: Tuple[torch.Tensor],
             batch_idx: int
@@ -510,7 +519,7 @@ class StudentModel(pl.LightningModule):                                 #TODO th
         for idx, position in enumerate(predicate_position):
             converted_preds[idx] = {"roles": {position: preds[idx]}}
             converted_labels[idx] = {"roles": {position: labels[idx]}}
-        print(evaluate_argument_classification(converted_labels, converted_preds))
+        #print(evaluate_argument_classification(converted_labels, converted_preds))
         self.log('val_f1', self.f1, prog_bar=True)
         #self.log('val_f1_per_class', self.f1_per_class, prog_bar=True)
         self.log('val_loss', forward_output['loss'],prog_bar=True)
@@ -632,7 +641,7 @@ trainer = pl.Trainer(
 )
 
 # and finally we can let the "trainer" fit the amazon reviews classifier.
-trainer.fit(model=classifier, datamodule=sentences_dm)
+#trainer.fit(model=classifier, datamodule=sentences_dm)
 
 
 model_path = "../../model/model.ckpt"
@@ -666,8 +675,9 @@ def read_dataset(path: str):
     return sentences, labels
 
 sentences,labels = read_dataset(EN_DEV_PATH)
-for key in sentences:
-    print(loaded.predict(sentences[key]))
+for idx,key in enumerate(sentences):
+    print("PREDICTED",loaded.predict(sentences[key])["roles"])
+    print("GROUND TRUTH",labels[key]["roles"])
 
 
 
