@@ -189,9 +189,19 @@ class SentenceDataset(Dataset):
 
 
                     instance["around_predicate"] = [0]*len(roles)
-                    start = max(0,int(position)-2)
-                    stop = min(len(roles),int(position)+4)
-                    for i in range(start,stop): instance["around_predicate"][i] = 1
+                    around_number = 10
+                    start = max(0, int(position) - 4)
+                    stop = min(len(roles), int(position) + 6)
+                    for i in range(start, stop): instance["around_predicate"][i] = 1
+                    count = instance["around_predicate"].count(1)
+
+                    if count < around_number:
+                        if start == 0:
+                            for i in range(stop + (around_number - count)):
+                                instance["around_predicate"][i] = 1
+                        elif stop == len(roles):
+                            for i in range(len(roles) - around_number, len(roles)):
+                                instance["around_predicate"][i] = 1
                     #instance["around_predicate"][max([int(position)-10,0]):min([int(position)+10,len(roles)])] = [1]*20
                     sentences.append(self.text_preprocess(instance))
             else:
@@ -463,11 +473,11 @@ class StudentModel(pl.LightningModule):                                 #TODO th
         masked_y = y[mask]
         masked_pred = pred[mask]
         masked_logits = logits[mask]
-        '''
-        flat_preds = torch.argmax(pred,dim=1)
+        #'''
+        flat_preds = torch.argmax(masked_around_pred,dim=1)
         #print(masked_pred.size(),pred, "PREDS")
         #print(flat_preds.size(),flat_preds, "ARGMAX")
-        flat_preds = flat_preds.view(pred.size(0),1)
+        flat_preds = flat_preds.view(masked_around_pred.size(0),1)
         #print(flat_preds.shape, flat_preds, "ARGMAX")
         #print(masked_y.size(),masked_y,"Y")
 
@@ -476,14 +486,15 @@ class StudentModel(pl.LightningModule):                                 #TODO th
         #for x in masked_y:
         #    print(x)
         #0/0
-        result = {'logits': logits, 'pred': pred, "labels":y, "flat_pred":flat_preds, "mask":mask,
-                  "predicate_position":predicate_position, }
+        result = {'logits': masked_around_logits, 'pred': masked_around_pred, "labels":masked_around_y,
+                  "flat_pred":flat_preds, "mask":mask,
+                  "predicate_position":predicate_position}
 
         # compute loss
         if y is not None:
             # while mathematically the CrossEntropyLoss takes as input the probability distributions,
             # torch optimizes its computation internally and takes as input the logits instead
-            loss = self.loss_fn(logits, y)
+            loss = self.loss_fn(masked_around_logits, masked_around_y)
             result['loss'] = loss
 
         return result
@@ -512,6 +523,7 @@ class StudentModel(pl.LightningModule):                                 #TODO th
         #print("\n VALIDATION F1 PER CLASS: ",self.f1_per_class(forward_output['flat_pred'], forward_output["labels"]))
 
         predicate_position = forward_output["predicate_position"]
+        '''
         preds = forward_output["flat_pred"].view(predicate_position.size(0), -1)
         labels = forward_output["labels"].view(predicate_position.size(0), -1)
         converted_preds = dict()
@@ -519,6 +531,7 @@ class StudentModel(pl.LightningModule):                                 #TODO th
         for idx, position in enumerate(predicate_position):
             converted_preds[idx] = {"roles": {position: preds[idx]}}
             converted_labels[idx] = {"roles": {position: labels[idx]}}
+        '''
         #print(evaluate_argument_classification(converted_labels, converted_preds))
         self.log('val_f1', self.f1, prog_bar=True)
         #self.log('val_f1_per_class', self.f1_per_class, prog_bar=True)
@@ -538,7 +551,7 @@ class StudentModel(pl.LightningModule):                                 #TODO th
 
     def configure_optimizers(self):
         #optimizer = torch.optim.SGD(self.parameters(), lr=0.1, momentum=0.0)
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.0001,weight_decay=0.000)  # instantiating the optimizer
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.00001,weight_decay=0.000)  # instantiating the optimizer
         return optimizer
 
     def predict(self, sentence):
@@ -600,11 +613,16 @@ class StudentModel(pl.LightningModule):                                 #TODO th
             n_values = X.size(0)*X.size(1)
             reconstructed = torch.tensor([28]*n_values,dtype=torch.long, device=device).view(X.size(0),X.size(1))
                # torch.zeros(size=X.size(),dtype=torch.long,device=device)
-            #reconstructed[masks] = preds
-            reconstructed = preds
+            #reconstructed[around_predicate] = preds
+            for idx in range(len(around_predicate)):
+                reconstructed[idx][around_predicate[idx]] = preds[idx]
+            #reconstructed = preds
             for idx,position in enumerate(predicate_position):
-                out["roles"][position.item()] = [sentences.idx2roles[role.item()] for role in torch.flatten(reconstructed[idx])]
-
+                if position.item() != -1:
+                    out["roles"][position.item()] = [sentences.idx2roles[role.item()] for role in torch.flatten(reconstructed[idx])][1:-1]
+                    del out["roles"][position.item()][position.item()]
+                    del out["roles"][position.item()][position.item()+1]
+                #print("a")
         return out
 
 
@@ -641,7 +659,7 @@ trainer = pl.Trainer(
 )
 
 # and finally we can let the "trainer" fit the amazon reviews classifier.
-#trainer.fit(model=classifier, datamodule=sentences_dm)
+trainer.fit(model=classifier, datamodule=sentences_dm)
 
 
 model_path = "../../model/model.ckpt"
@@ -676,8 +694,10 @@ def read_dataset(path: str):
 
 sentences,labels = read_dataset(EN_DEV_PATH)
 for idx,key in enumerate(sentences):
-    print("PREDICTED",loaded.predict(sentences[key])["roles"])
-    print("GROUND TRUTH",labels[key]["roles"])
+    prediction = loaded.predict(sentences[key])["roles"]
+    lab = labels[key]["roles"]
+    print("PREDICTED",prediction)
+    print("GROUND TRUTH",lab)
 
 
 
