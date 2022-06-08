@@ -297,8 +297,8 @@ class SentenceDataset(Dataset):
         return DataLoader(self, batch_size=batch_size, collate_fn=partial(self.collate), shuffle=shuffle)
 
     # function to map each lemma,pos in a sentence to their indexes
-    def sent2idx(self, sent, word2idx):
-        return torch.tensor([word2idx[word] for word in sent])
+    def sent2idx(self, sent, word2idx,is_tensor=False):
+        return [word2idx[word] for word in sent]
 
     # custom collate function, used to create the batches to give as input to the nn
     # it's needed because we are dealing with sentences of variable length and we need padding
@@ -311,7 +311,7 @@ class SentenceDataset(Dataset):
         segment_ids = [torch.tensor(instance["segment_ids"]) for instance in data]
         predicate_position = torch.tensor([torch.tensor(instance["predicate_position"]) for instance in data],device=device)
         attention_mask = [torch.tensor(instance["attention_mask"],dtype=torch.bool) for instance in data]
-        y = [self.sent2idx(instance["tokenized_roles"], self.roles2idx) for instance in data]  # extracting labels for each sentence
+        y = [torch.tensor(self.sent2idx(instance["tokenized_roles"], self.roles2idx)) for instance in data]  # extracting labels for each sentence
         around_predicate = [torch.tensor(instance["around_predicate"],dtype=torch.bool) for instance in data]
         ids = [instance["id"] for instance in data]  # extracting the sentences' ids
         X = torch.nn.utils.rnn.pad_sequence(X, batch_first=True, padding_value=100).to(device)  # padding all the sentences to the maximum length in the batch (forcefully max_len)
@@ -326,13 +326,12 @@ class SentenceDataset(Dataset):
 
 
     # function to convert the output ids to the corresponding labels
-    def convert_output(self, output):
-        converted = []
-        for sentence in output:
-            converted_sent = []
-            for label in sentence:
-                converted_sent.append(self.id2class[label.item()])
-            converted.append(converted_sent)
+    def convert_output(self, output,predicate_position):
+        converted = {
+            "roles":{}
+        }
+        for idx,position in enumerate(predicate_position):
+            converted["roles"][position] = self.sent2idx(output[idx],self.idx2roles)
         return converted
 
 class SentencesDataModule(pl.LightningDataModule):
@@ -418,7 +417,7 @@ class StudentModel(pl.LightningModule):                                 #TODO th
         self.f1 = torchmetrics.classification.F1Score(num_classes=num_classes,ignore_index=0).to(device)
         self.bert = BertModel.from_pretrained(BERT_PATH,local_files_only=True,output_hidden_states=True, is_decoder=True,
                                               add_cross_attention=True)
-        #self.bert.eval()
+        self.bert.eval()
     # forward method, automatically called when calling the instance
     # it takes the input tokens'indices, the labels'indices and the PoS tags'indices linked to input tokens
     def forward(self, X,X_len,segment_ids,y,predicate_position,attention_mask,around_predicate, ids):           #TODO highligt the predicate
@@ -551,7 +550,7 @@ class StudentModel(pl.LightningModule):                                 #TODO th
 
     def configure_optimizers(self):
         #optimizer = torch.optim.SGD(self.parameters(), lr=0.1, momentum=0.0)
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.00001,weight_decay=0.000)  # instantiating the optimizer
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.0001,weight_decay=0.00001)  # instantiating the optimizer
         return optimizer
 
     def predict(self, sentence):
@@ -616,13 +615,18 @@ class StudentModel(pl.LightningModule):                                 #TODO th
             #reconstructed[around_predicate] = preds
             for idx in range(len(around_predicate)):
                 reconstructed[idx][around_predicate[idx]] = preds[idx]
+                #reconstructed[idx] = torch.flatten(reconstructed[idx])
             #reconstructed = preds
+            '''
             for idx,position in enumerate(predicate_position):
                 if position.item() != -1:
-                    out["roles"][position.item()] = [sentences.idx2roles[role.item()] for role in torch.flatten(reconstructed[idx])][1:-1]
+                    #out["roles"][position.item()] = [sentences.idx2roles[role.item()] for role in torch.flatten(reconstructed[idx])][1:-1]
+                    ["roles"][position.item()] = sentences.convert_output(torch.flatten(reconstructed[idx])[1:-1])
                     del out["roles"][position.item()][position.item()]
                     del out["roles"][position.item()][position.item()+1]
                 #print("a")
+            '''
+            out = sentences.convert_output(reconstructed.tolist(),predicate_position.tolist())
         return out
 
 
@@ -648,7 +652,7 @@ sentences_dm = SentencesDataModule(
     batch_size=32
 )
 #'''
-classifier = StudentModel(language="en",hidden1=768,lstm_layers=1,bidirectional=False,p=0.0)
+classifier = StudentModel(language="en",hidden1=768,lstm_layers=1,bidirectional=False,p=0.5)
 
 
 # the PyTorch Lightning Trainer
