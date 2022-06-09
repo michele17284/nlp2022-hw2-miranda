@@ -331,6 +331,7 @@ class SentenceDataset(Dataset):
             "roles":{}
         }
         for idx,position in enumerate(predicate_position):
+          if position != -1:
             converted["roles"][position] = self.sent2idx(output[idx],self.idx2roles)
         return converted
 
