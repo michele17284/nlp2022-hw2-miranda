@@ -44,7 +44,7 @@ POS_EMBEDDING_DIM = 10
 
 # specify the device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = torch.device("cpu")
+#device = torch.device("cpu")
 print(device)
 # setting unknown token to handle out of vocabulary words and padding token to pad sentences
 UNK_TOKEN = '<unk>'
@@ -64,6 +64,8 @@ SEMANTIC_ROLES = ["AGENT", "ASSET", "ATTRIBUTE", "BENEFICIARY", "CAUSE", "CO_AGE
                   "PURPOSE",
                   "RECIPIENT", "RESULT", "SOURCE", "STIMULUS", "THEME", "TIME", "TOPIC", "VALUE", "_"]
 
+
+torch.set_printoptions(threshold=10_000)
 
 def evaluate_argument_identification(labels, predictions, null_tag=28):
     true_positives, false_positives, false_negatives = 0, 0, 0
@@ -189,7 +191,8 @@ class PredicateDataset(Dataset):
         for key in json_file:
             json_file[key]["id"] = key
             instance = json_file[key]
-            instance["attention_mask"] = [1]*len(instance["predicates"])
+            instance["attention_mask"] = [1]*len(instance["words"])
+            if sentences_plain: instance["predicates"] = ["_"] * len(instance["words"])
             '''
             if json_file[key]["predicates"].count("_") != len(json_file[key]["predicates"]):
                 instance["converted_predicates"] = self.sent2idx(instance["predicates"],self.frame2id)
@@ -341,7 +344,7 @@ class PredicatesDataModule(pl.LightningDataModule):
 
 
 class AB_Model(
-    pl.LightningModule):  # TODO this is now a model for role classification, let's make it identification + classification
+    pl.LightningModule):
 
     # STUDENT: construct here your model
     # this class should be loading your weights and vocabulary
@@ -383,7 +386,7 @@ class AB_Model(
 
     # forward method, automatically called when calling the instance
     # it takes the input tokens'indices, the labels'indices and the PoS tags'indices linked to input tokens
-    def forward(self, X, X_len, segment_ids, y, attention_mask, ids):  # TODO highligt the predicate
+    def forward(self, X, X_len, segment_ids, y, attention_mask, ids):
         outputs = self.bert(input_ids=X, token_type_ids=segment_ids, attention_mask=attention_mask)
         hidden_states = outputs[2]
         token_embeddings = torch.stack(hidden_states, dim=0)
@@ -501,7 +504,7 @@ class AB_Model(
 
     def configure_optimizers(self):
         # optimizer = torch.optim.SGD(self.parameters(), lr=0.1, momentum=0.0)
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.0001, weight_decay=0.0000)  # instantiating the optimizer
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.00001, weight_decay=0.0000)  # instantiating the optimizer
         return optimizer
 
     def predict(self, sentence):
@@ -513,9 +516,9 @@ class AB_Model(
             output = self.forward(X, X_len, segment_ids, y, attention_mask, ids)
             preds = output["flat_pred"].view(X.size(0), -1)
             out = sentences.convert_output(torch.flatten(preds).tolist())
-        return out
+        return out[1:-1]
 
-'''
+#'''
 early_stopping = pl.callbacks.EarlyStopping(
     monitor='val_f1',  # the value that will be evaluated to activate the early stopping of the model.
     patience=5,
@@ -550,10 +553,10 @@ trainer = pl.Trainer(
 )
 
 # and finally we can let the "trainer" fit the amazon reviews classifier.
-#trainer.fit(model=classifier, datamodule=sentences_dm)
+trainer.fit(model=classifier, datamodule=sentences_dm)
 
 model_path = "../../model/modelAB.ckpt"
-loaded = AB_Model.load_from_checkpoint(model_path,num_classes=len(frame2id)+2 , language="en").to(device)
+classifier = AB_Model.load_from_checkpoint(model_path,num_classes=len(frame2id)+2 , language="en").to(device)
 
 
 def read_dataset(path: str):
@@ -585,10 +588,10 @@ def read_dataset(path: str):
 sentences, labels = read_dataset(EN_DEV_PATH)
 
 for idx, key in enumerate(sentences):
-    prediction = loaded.predict(sentences[key])
+    prediction = classifier.predict(sentences[key])
     lab = labels[key]["predicates"]
-    print("PREDICTED", prediction)
-    print("GROUND TRUTH", lab)
-'''
+    print("PREDICTED", len(prediction), prediction)
+    print("GROUND TRUTH", len(lab), lab)
+#'''
 
 
