@@ -5,3 +5,6 @@ numpy==1.21.5
 tqdm==4.63.0
 torch==1.9.0
 rich==12.0.0
+nltk
+pytorch-lightning
+transformers

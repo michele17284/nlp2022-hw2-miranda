@@ -11,23 +11,23 @@ all_languages = mandatory_languages + extras_languages
 models_34, models_234, models_1234 = dict(), dict(), dict()
 
 for lang in mandatory_languages:
-    models_34[lang] = build_model_34("cpu", lang)
+    models_34[lang] = build_model_34(device="cpu", language=lang)
 
 for lang in extras_languages:
     try:
-        models_34[lang] = build_model_34("cpu", lang)
+        models_34[lang] = build_model_34(device="cpu", language=lang)
     except:
         pass
 
 for lang in all_languages:
     try:
-        models_234[lang] = build_model_234("cpu", lang)
+        models_234[lang] = build_model_234(device="cpu", language=lang)
     except:
         pass
 
 for lang in all_languages:
     try:
-        models_1234[lang] = build_model_1234("cpu", lang)
+        models_1234[lang] = build_model_1234(device="cpu", language=lang)
     except:
         pass
 
