@@ -27,11 +27,13 @@ EN_DEV_PATH = "./../../data/EN/dev.json"
 BERT_PATH = "./model/bert-base-cased"
 MODEL_CD_PATH = "./model/modelCD.ckpt"
 MODEL_AB_PATH = "./model/modelAB.ckpt"
-from stud import training_ab
-from stud import training_cd
+
+from stud import model_AB
+from stud import model_CD
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device('cpu')
 MODEL_AB_PATH = "./model/modelAB.ckpt"
 MODEL_CD_PATH = "./model/modelCD.ckpt"
 
@@ -51,7 +53,7 @@ def build_model_34(language: str, device: str) -> Model:
             4: Argument classification.
     """
 
-    loaded = training_cd.CD_Model.load_from_checkpoint(MODEL_CD_PATH, language=language)
+    loaded = model_CD.CD_Model.load_from_checkpoint(MODEL_CD_PATH, language=language)
     return loaded
 
 
@@ -181,8 +183,8 @@ class StudentModel(Model):
     def __init__(self,language,device):  # loss function
         super().__init__()
 
-        self.modelAB = training_ab.AB_Model.load_from_checkpoint(MODEL_AB_PATH,language=language).to(device)
-        self.modelCD = training_cd.CD_Model.load_from_checkpoint(MODEL_CD_PATH,language=language).to(device)
+        self.modelAB = model_AB.AB_Model.load_from_checkpoint(MODEL_AB_PATH,language=language).to(device)
+        self.modelCD = model_CD.CD_Model.load_from_checkpoint(MODEL_CD_PATH,language=language).to(device)
 
 
 
