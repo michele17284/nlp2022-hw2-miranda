@@ -52,10 +52,10 @@ UNK_TOKEN = '<unk>'
 PAD_TOKEN = '<pad>'
 EN_TRAIN_PATH = "./../../data/EN/train.json"
 EN_DEV_PATH = "./../../data/EN/dev.json"
-#BERT_PATH = "./../../model/bert-base-cased"
-BERT_PATH = "./model/bert-base-cased"
-#VERBATLAS_PATH = "./VerbAtlas/VerbAtlas"
-VERBATLAS_PATH = "./hw2/stud/VerbAtlas/VerbAtlas"
+BERT_PATH = "./../../model/bert-base-cased"
+#BERT_PATH = "./model/bert-base-cased"
+VERBATLAS_PATH = "./VerbAtlas/VerbAtlas"
+#VERBATLAS_PATH = "./hw2/stud/VerbAtlas/VerbAtlas"
 print(torch.version.cuda)
 
 SEMANTIC_ROLES = ["AGENT", "ASSET", "ATTRIBUTE", "BENEFICIARY", "CAUSE", "CO_AGENT", "CO_PATIENT", "CO_THEME",
@@ -66,6 +66,10 @@ SEMANTIC_ROLES = ["AGENT", "ASSET", "ATTRIBUTE", "BENEFICIARY", "CAUSE", "CO_AGE
 
 
 torch.set_printoptions(threshold=10_000)
+from nltk.data import load
+nltk.download("tagsets")
+tagdict = load('help/tagsets/upenn_tagset.pickle')
+
 
 def evaluate_argument_identification(labels, predictions, null_tag=28):
     true_positives, false_positives, false_negatives = 0, 0, 0
@@ -160,24 +164,23 @@ class PredicateDataset(Dataset):
                  test=False):
         self.test = test
 
-        self.SEMANTIC_ROLES = ["<pad>", "AGENT", "ASSET", "ATTRIBUTE", "BENEFICIARY", "CAUSE", "CO-AGENT", "CO-PATIENT",
-                               "CO-THEME", "DESTINATION",
-                               "EXPERIENCER", "EXTENT", "GOAL", "IDIOM", "INSTRUMENT", "LOCATION", "MATERIAL",
-                               "PATIENT", "PRODUCT", "PURPOSE",
-                               "RECIPIENT", "RESULT", "SOURCE", "STIMULUS", "THEME", "TIME", "TOPIC", "VALUE", "_"]
-        self.roles2idx = {role.lower(): idx for idx, role in enumerate(self.SEMANTIC_ROLES)}
-        self.roles2idx["<pred>"] = 0
+        self.pos2idx = {pos:idx for idx,pos in enumerate(tagdict.keys())}
+        #self.pos2idx["_"] = len(self.pos2idx)
+        self.pos2idx["<pad>"] = len(self.pos2idx)
+        self.idx2pos = {idx:pos for pos,idx in self.pos2idx.items()}
         self.id2frame = id2frame
         self.frame2id = frame2id
         self.frame2idx = {frame:idx for idx,(id,frame) in enumerate(self.id2frame.items())}
-        self.idx2frame = {idx:frame for frame,idx in self.frame2idx.items()}
         self.frame2idx["_"] = len(self.frame2idx)
-        self.idx2frame[len(self.idx2frame)] = "_"
         self.frame2idx["<pad>"] = len(self.frame2idx)
-        self.idx2frame[len(self.idx2frame)] = "<pad>"
-        self.idx2roles = {idx: role.lower() for idx, role in enumerate(self.SEMANTIC_ROLES)}
+        self.idx2frame = {idx:frame for frame,idx in self.frame2idx.items()}
+
+        #self.idx2frame[len(self.idx2frame)] = "_"
+
+        #self.idx2frame[len(self.idx2frame)] = "<pad>"
         self.sentences = self.read_sentences(sentences_path=sentences_path, sentences_plain=sentences)
         self.bert_preprocess(self.sentences)
+
 
     # little function to read and store a file given the path
     def read_sentences(self, sentences_path, sentences_plain):
@@ -202,24 +205,19 @@ class PredicateDataset(Dataset):
             sentences.append(self.text_preprocess(instance))
         return sentences
 
-    # function for preprocessing, which includes pos tagging and (if specified) lemmatization
-    def text_preprocess(self, sentence):
-        tokens_n_pos = nltk.pos_tag(sentence["lemmas"])
-        # standard_tokens = [(token,self.get_standard(pos)) for token,pos in tokens_n_pos]
-        sentence["pos"] = [pos for word, pos in tokens_n_pos]
-        return sentence
+
 
     def bert_preprocess(self, sentences):  # TODO tokenize with bert
         # tokenizer = BertTokenizer.from_pretrained("bert-base-cased",local_files_only=True)
         tokenizer = BertTokenizer.from_pretrained(BERT_PATH, local_files_only=True)
         for sentence in sentences:
-            text = "[CLS] " + " ".join(sentence["words"]) + " [SEP]"
             non_joined_text = ["[CLS]"] + sentence["words"] + ["[SEP]"]
             encoded = tokenizer.convert_tokens_to_ids(non_joined_text)
             segments_ids = [1] * len(non_joined_text)
             sentence["segment_ids"] = segments_ids
             sentence["encoded_words"] = encoded
             sentence["tokenized_predicates"] = ["<pad>"] + sentence["predicates"] + ["<pad>"]
+            #sentence["dependency_heads"] = [-1]+sentence["dependency_heads"]+[-1]
             sentence["attention_mask"] = [0] + sentence["attention_mask"] + [0]
             # assert len(non_joined_text) == len(sentence["attention_mask"])
         return sentences
@@ -230,19 +228,6 @@ class PredicateDataset(Dataset):
             word2idx[word] = i
         return word2idx
 
-    # function to extract the sentences from the dictionary of samples
-    def extract_sentences(self, file_output):
-        self.sentences = list()  # creating a list to store the instances in the dataset
-        for instance in file_output:
-            processed = self.text_preprocess(
-                instance)  # process every sample (sentence) with the text_preprocess function
-            labels = 'UNKNOWN'  # this is needed to make the system able to store the sentences without a ground truth (for predictions)
-            if 'labels' in instance:  # but if there is a ground truth we take it
-                labels = processed['labels']
-            self.sentences.append((processed["text"], processed["pos"], labels,
-                                   id))  # append a tuple (sentence,pos,labels,id) which are all the informations we need
-        if not self.test: random.Random(42).shuffle(
-            self.sentences)  # for the training phase, shuffle data to avoid bias relative to data order
 
     # function to convert the pos extracted by nltk to the pos required by the very same library for lemmatization
     # I also use it to give pos='' to punctuation
@@ -277,6 +262,7 @@ class PredicateDataset(Dataset):
         X = [torch.tensor(instance["encoded_words"]) for instance in data]  # extracting the input sentence
         X_len = torch.tensor([x.size(0) for x in X], dtype=torch.long).to(
             device)  # extracting the length for each sentence
+        #dependency_heads = [torch.tensor(instance["dependency_heads"]) for instance in data]
         # X_pos = [self.sent2idx(instance["pos"], self.pos2idx) for instance in data]  # extracting pos tags for each sentence
         segment_ids = [torch.tensor(instance["segment_ids"]) for instance in data]
         attention_mask = [torch.tensor(instance["attention_mask"], dtype=torch.bool) for instance in data]
@@ -285,6 +271,8 @@ class PredicateDataset(Dataset):
         ids = [instance["id"] for instance in data]  # extracting the sentences' ids
         X = torch.nn.utils.rnn.pad_sequence(X, batch_first=True, padding_value=100).to(
             device)  # padding all the sentences to the maximum length in the batch (forcefully max_len)
+        #dependency_heads = torch.nn.utils.rnn.pad_sequence(dependency_heads, batch_first=True, padding_value=-1).to(
+        #    device)
         # X_pos = torch.nn.utils.rnn.pad_sequence(X_pos, batch_first=True, padding_value=1).to(device)  # padding all the pos tags
         y = torch.nn.utils.rnn.pad_sequence(y, batch_first=True, padding_value=self.roles2idx[PAD_TOKEN]).to(
             device)  # padding all the labels
@@ -292,7 +280,7 @@ class PredicateDataset(Dataset):
         attention_mask = torch.nn.utils.rnn.pad_sequence(attention_mask, batch_first=True, padding_value=0).to(device)
         segment_ids = torch.nn.utils.rnn.pad_sequence(segment_ids, batch_first=True, padding_value=0).to(device)
 
-        return X, X_len, segment_ids, y, attention_mask, ids
+        return X, X_len,  segment_ids, y, attention_mask, ids
 
     # function to convert the output ids to the corresponding labels
     def convert_output(self, output):
@@ -369,7 +357,7 @@ class AB_Model(
         self.num_classes = num_classes
         self.hidden1 = hidden1
         self.classifier = nn.Sequential(
-            nn.Linear(hidden1, hidden2),
+            nn.Linear(hidden2, hidden2),
             nn.ReLU(),
             nn.Dropout(p),
             nn.Linear(hidden2, num_classes)
@@ -383,9 +371,13 @@ class AB_Model(
                                               is_decoder=True,
                                               add_cross_attention=True)
         self.bert.eval()
-
+        self.lstm = nn.LSTM(input_size=hidden1, hidden_size=hidden2, num_layers=lstm_layers, batch_first=True,
+                            bidirectional=bidirectional,dropout=p)
     # forward method, automatically called when calling the instance
     # it takes the input tokens'indices, the labels'indices and the PoS tags'indices linked to input tokens
+
+
+
     def forward(self, X, X_len, segment_ids, y, attention_mask, ids):
         outputs = self.bert(input_ids=X, token_type_ids=segment_ids, attention_mask=attention_mask)
         hidden_states = outputs[2]
@@ -421,8 +413,13 @@ class AB_Model(
                                    dim=-1)  # and then concatenate them to the corresponding words
         '''
         token_vecs_cat = torch.stack(token_vecs_cat, dim=0)
+        #dependency_heads = dependency_heads.view(dependency_heads.size(0)*dependency_heads.size(1),1)
+        #token_vecs_cat = torch.cat((token_vecs_cat,dependency_heads),dim=1)
         # lstm_out = self.lstm(token_vecs_cat)[0]
-        out = self.classifier(token_vecs_cat)
+        lstm_out = self.lstm(token_vecs_cat)[0]
+        #batch_size, sentence_len, hidden_size = lstm_out.shape  # sentence length here is taken to remove padding
+        #flattened = lstm_out.reshape(-1, hidden_size)
+        out = self.classifier(lstm_out)
 
         out = out.view(-1, out.shape[-1])
         logits = out
@@ -504,7 +501,7 @@ class AB_Model(
 
     def configure_optimizers(self):
         # optimizer = torch.optim.SGD(self.parameters(), lr=0.1, momentum=0.0)
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.00001, weight_decay=0.0000)  # instantiating the optimizer
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.00001, weight_decay=0.00001)  # instantiating the optimizer
         return optimizer
 
     def predict(self, sentence):
@@ -518,80 +515,5 @@ class AB_Model(
             out = sentences.convert_output(torch.flatten(preds).tolist())
         return out[1:-1]
 
-#'''
-early_stopping = pl.callbacks.EarlyStopping(
-    monitor='val_f1',  # the value that will be evaluated to activate the early stopping of the model.
-    patience=5,
-    # the number of consecutive attempts that the model has to raise (or lower depending on the metric used) to raise the "monitor" value.
-    verbose=True,  # whether to log or not information in the console.
-    mode='max',  # wheter we want to maximize (max) or minimize the "monitor" value.
-)
-
-check_point_callback = pl.callbacks.ModelCheckpoint(
-    monitor='val_f1',  # the value that we want to use for model selection.
-    verbose=True,  # whether to log or not information in the console.
-    save_top_k=1,  # the number of checkpoints we want to store.
-    mode='max',  # wheter we want to maximize (max) or minimize the "monitor" value.
-    filename='modelAB_{epoch}-{val_f1:.4f}'
-    # the prefix on the checkpoint values. Metrics store by the trainer can be used to dynamically change the name.
-)
-
-sentences_dm = PredicatesDataModule(
-    data_train_path=EN_TRAIN_PATH,
-    data_dev_path=EN_DEV_PATH,
-    data_test_path=EN_DEV_PATH,
-    batch_size=32
-)
-
-classifier = AB_Model(num_classes=len(frame2id)+2,language="en", hidden1=768, lstm_layers=1, bidirectional=False, p=0.)
-
-# the PyTorch Lightning Trainer
-trainer = pl.Trainer(
-    max_epochs=20,  # maximum number of epochs.
-    gpus=1,  # the number of gpus we have at our disposal.
-    callbacks=[early_stopping, check_point_callback]  # the callback we want our trainer to use.
-)
-
-# and finally we can let the "trainer" fit the amazon reviews classifier.
-trainer.fit(model=classifier, datamodule=sentences_dm)
-
-model_path = "../../model/modelAB.ckpt"
-classifier = AB_Model.load_from_checkpoint(model_path,num_classes=len(frame2id)+2 , language="en").to(device)
-
-
-def read_dataset(path: str):
-    with open(path) as f:
-        dataset = json.load(f)
-
-    sentences, labels = {}, {}
-    for sentence_id, sentence in dataset.items():
-        sentence_id = sentence_id
-        sentences[sentence_id] = {
-            "words": sentence["words"],
-            "lemmas": sentence["lemmas"],
-            "pos_tags": sentence["pos_tags"],
-            "dependency_heads": [int(head) for head in sentence["dependency_heads"]],
-            "dependency_relations": sentence["dependency_relations"],
-            "predicates": sentence["predicates"],
-        }
-
-        labels[sentence_id] = {
-            "predicates": sentence["predicates"],
-            "roles": {int(p): r for p, r in sentence["roles"].items()}
-            if "roles" in sentence
-            else dict(),
-        }
-
-    return sentences, labels
-
-
-sentences, labels = read_dataset(EN_DEV_PATH)
-
-for idx, key in enumerate(sentences):
-    prediction = classifier.predict(sentences[key])
-    lab = labels[key]["predicates"]
-    print("PREDICTED", len(prediction), prediction)
-    print("GROUND TRUTH", len(lab), lab)
-#'''
 
 

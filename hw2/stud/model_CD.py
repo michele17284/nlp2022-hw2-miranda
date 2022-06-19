@@ -43,14 +43,13 @@ POS_EMBEDDING_DIM = 10
 
 # specify the device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = torch.device("cpu")
+#device = torch.device("cpu")
 print(device)
 # setting unknown token to handle out of vocabulary words and padding token to pad sentences
 UNK_TOKEN = '<unk>'
 #PAD_TOKEN = '_' #???????????????
 PAD_TOKEN = '<pad>'
-EN_TRAIN_PATH = "./../../data/EN/train.json"
-EN_DEV_PATH = "./../../data/EN/dev.json"
+
 #BERT_PATH = "./../../model/bert-base-cased"
 BERT_PATH = "./model/bert-base-cased"
 print(torch.version.cuda)
@@ -60,6 +59,7 @@ SEMANTIC_ROLES = ["AGENT", "ASSET", "ATTRIBUTE", "BENEFICIARY", "CAUSE", "CO_AGE
                   "EXPERIENCER", "EXTENT", "GOAL", "IDIOM", "INSTRUMENT", "LOCATION", "MATERIAL", "PATIENT", "PRODUCT",
                   "PURPOSE",
                   "RECIPIENT", "RESULT", "SOURCE", "STIMULUS", "THEME", "TIME", "TOPIC", "VALUE","_"]
+
 
 
 def evaluate_argument_identification(labels, predictions, null_tag=28):
@@ -631,78 +631,6 @@ class CD_Model(pl.LightningModule):                                 #TODO this i
         return out
 
 
-early_stopping = pl.callbacks.EarlyStopping(
-    monitor='val_f1',  # the value that will be evaluated to activate the early stopping of the model.
-    patience=5,  # the number of consecutive attempts that the model has to raise (or lower depending on the metric used) to raise the "monitor" value.
-    verbose=True,  # whether to log or not information in the console.
-    mode='max', # wheter we want to maximize (max) or minimize the "monitor" value.
-)
 
-check_point_callback = pl.callbacks.ModelCheckpoint(
-    monitor='val_f1',  # the value that we want to use for model selection.
-    verbose=True,  # whether to log or not information in the console.
-    save_top_k=1,  # the number of checkpoints we want to store.
-    mode='max',  # wheter we want to maximize (max) or minimize the "monitor" value.
-    filename='model_CD{epoch}-{val_f1:.4f}'  # the prefix on the checkpoint values. Metrics store by the trainer can be used to dynamically change the name.
-)
-'''
-sentences_dm = SentencesDataModule(
-    data_train_path=EN_TRAIN_PATH,
-    data_dev_path=EN_DEV_PATH,
-    data_test_path=EN_DEV_PATH,
-    batch_size=32
-)
-
-classifier = CD_Model(language="en",hidden1=768,lstm_layers=1,bidirectional=False)
-
-
-# the PyTorch Lightning Trainer
-trainer = pl.Trainer(
-    max_epochs=20,  # maximum number of epochs.
-    gpus=1,  # the number of gpus we have at our disposal.
-    callbacks=[early_stopping, check_point_callback]  # the callback we want our trainer to use.
-)
-
-# and finally we can let the "trainer" fit the amazon reviews classifier.
-trainer.fit(model=classifier, datamodule=sentences_dm)
-
-
-model_path = "../../model/modelCD.ckpt"
-loaded = CD_Model.load_from_checkpoint(model_path,language="en").to(device)
-
-
-
-def read_dataset(path: str):
-    with open(path) as f:
-        dataset = json.load(f)
-
-    sentences, labels = {}, {}
-    for sentence_id, sentence in dataset.items():
-        sentence_id = sentence_id
-        sentences[sentence_id] = {
-            "words": sentence["words"],
-            "lemmas": sentence["lemmas"],
-            "pos_tags": sentence["pos_tags"],
-            "dependency_heads": [int(head) for head in sentence["dependency_heads"]],
-            "dependency_relations": sentence["dependency_relations"],
-            "predicates": sentence["predicates"],
-        }
-
-        labels[sentence_id] = {
-            "predicates": sentence["predicates"],
-            "roles": {int(p): r for p, r in sentence["roles"].items()}
-            if "roles" in sentence
-            else dict(),
-        }
-
-    return sentences, labels
-
-sentences,labels = read_dataset(EN_DEV_PATH)
-for idx,key in enumerate(sentences):
-    prediction = loaded.predict(sentences[key])["roles"]
-    lab = labels[key]["roles"]
-    print("PREDICTED",prediction)
-    print("GROUND TRUTH",lab)
-#'''
 
 
