@@ -202,7 +202,7 @@ class PredicateDataset(Dataset):
             else:
                 instance["converted_predicates"] = instance["predicates"]
             '''
-            sentences.append(self.text_preprocess(instance))
+            sentences.append(instance)
         return sentences
 
 
@@ -274,7 +274,7 @@ class PredicateDataset(Dataset):
         #dependency_heads = torch.nn.utils.rnn.pad_sequence(dependency_heads, batch_first=True, padding_value=-1).to(
         #    device)
         # X_pos = torch.nn.utils.rnn.pad_sequence(X_pos, batch_first=True, padding_value=1).to(device)  # padding all the pos tags
-        y = torch.nn.utils.rnn.pad_sequence(y, batch_first=True, padding_value=self.roles2idx[PAD_TOKEN]).to(
+        y = torch.nn.utils.rnn.pad_sequence(y, batch_first=True, padding_value=self.frame2idx[PAD_TOKEN]).to(
             device)  # padding all the labels
         # predicate_position = torch.nn.utils.rnn.pad_sequence(predicate_position, batch_first=True, padding_value=100).to(device)  # padding all the labels
         attention_mask = torch.nn.utils.rnn.pad_sequence(attention_mask, batch_first=True, padding_value=0).to(device)
