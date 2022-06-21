@@ -16,7 +16,6 @@ import torchmetrics
 import pytorch_lightning as pl
 import torch
 from transformers import BertTokenizer, BertModel
-
 # OPTIONAL: if you want to have more information on what's happening, activate the logger as follows
 import logging
 #logging.basicConfig(level=logging.INFO)
@@ -43,12 +42,14 @@ POS_EMBEDDING_DIM = 10
 
 # specify the device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = torch.device("cpu")
+#device = torch.device("cpu")
 print(device)
 # setting unknown token to handle out of vocabulary words and padding token to pad sentences
 UNK_TOKEN = '<unk>'
 PAD_TOKEN = '<pad>'
 print(torch.version.cuda)
+BERT_PATH = "./model/bert-base-cased"
+#BERT_PATH = "../../model/bert-base-cased"
 
 SEMANTIC_ROLES = ["AGENT", "ASSET", "ATTRIBUTE", "BENEFICIARY", "CAUSE", "CO_AGENT", "CO_PATIENT", "CO_THEME",
                   "DESTINATION",
@@ -61,7 +62,7 @@ SEMANTIC_ROLES = ["AGENT", "ASSET", "ATTRIBUTE", "BENEFICIARY", "CAUSE", "CO_AGE
 
 class SentenceDataset(Dataset):
 
-    def __init__(self, sentences_path=None, sentence=None, lemmatization=False, predicates=None,
+    def __init__(self, sentences_path=None, sentence=None, predicates=None,
                  test=False):
         self.test = test
         self.sentences = self.read_sentences(sentences_path=sentences_path,single_sentence=sentence,input_predicates=predicates)
@@ -118,13 +119,14 @@ class SentenceDataset(Dataset):
 
 
                     instance["around_predicate"] = [1]*len(roles)
-                    '''
+                    #'''
                     around_number = 10
-                    start = max(0, int(position) - 9)
-                    stop = min(len(roles), int(position) + 11)
+                    start = max(0, int(position) - 10)
+                    stop = min(len(roles), int(position) + 10)
                     for i in range(start, stop): instance["around_predicate"][i] = 1
                     count = instance["around_predicate"].count(1)
-
+                    #'''
+                    '''
                     if count < around_number:
                         if start == 0:
                             for i in range(stop + (around_number - count)):
@@ -132,7 +134,7 @@ class SentenceDataset(Dataset):
                         elif stop == len(roles):
                             for i in range(len(roles) - around_number, len(roles)):
                                 instance["around_predicate"][i] = 1
-                    '''
+                    #'''
                     #instance["around_predicate"][max([int(position)-10,0]):min([int(position)+10,len(roles)])] = [1]*20
                     sentences.append(instance)
             else:
@@ -147,8 +149,8 @@ class SentenceDataset(Dataset):
         return sentences
 
     def bert_preprocess(self,sentences):    #TODO tokenize with bert
-        #tokenizer = BertTokenizer.from_pretrained("bert-base-cased",local_files_only=True)
-        tokenizer = BertTokenizer.from_pretrained("bert-base-cased")
+        tokenizer = BertTokenizer.from_pretrained(BERT_PATH,local_files_only=True)
+        #tokenizer = BertTokenizer.from_pretrained("bert-base-cased")
         for sentence in sentences:
             non_joined_text = ["[CLS]"]+sentence["words"]+["[SEP]"]
             if sentence["predicate_position"] != -1:
@@ -287,15 +289,11 @@ class CD_Model(pl.LightningModule):                                 #TODO this i
     # possible languages: ["EN", "FR", "ES"]
     # REMINDER: EN is mandatory the others are extras
     def __init__(self, language: str,  # pos embedding vectors
-                 input_dim=768,
                  hidden1=768,  # dimension of the first hidden layer
-                 hidden2=768,
-                 p=0.0,  # probability of dropout layer
-                 bidirectional=False,  # flag to decide if the LSTM must be bidirectional
-                 lstm_layers=1,  # layers of the LSTM
+                 hidden2=200,
+                 p=0.0,
                  num_classes=29):  # loss function
         super().__init__()
-        hidden1 = hidden1 * 2 if bidirectional else hidden1  # computing the dimension of the linear layer based on if the LSTM is bidirectional or not
         self.num_classes = num_classes
         self.hidden1 = hidden1
         self.classifier = nn.Sequential(
@@ -309,7 +307,7 @@ class CD_Model(pl.LightningModule):                                 #TODO this i
         self.language = language
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=0)
         self.f1 = torchmetrics.classification.F1Score(num_classes=num_classes,ignore_index=0).to(device)
-        self.bert = BertModel.from_pretrained("bert-base-cased",output_hidden_states=True, is_decoder=True,
+        self.bert = BertModel.from_pretrained(BERT_PATH,local_files_only=True,output_hidden_states=True, is_decoder=True,
                                               add_cross_attention=True)
         self.bert.eval()
     # forward method, automatically called when calling the instance
@@ -326,23 +324,24 @@ class CD_Model(pl.LightningModule):                                 #TODO this i
             sum_vec = torch.sum(token[-4:], dim=0)
             token_vecs_cat.append(sum_vec)
 
-        token_vecs_cat = torch.stack(token_vecs_cat, dim=0)
-        #lstm_out = self.lstm(token_vecs_cat)[0]
+        token_vecs_cat = torch.stack(token_vecs_cat, dim=0).view(X.size(0),X.size(1),token_embeddings.size(2))
         out = self.classifier(token_vecs_cat)
 
         out = out.view(-1, out.shape[-1])
         logits = out
         y = y.view(-1)
-        pred = torch.softmax(out, dim=-1)
+        pred = torch.softmax(logits, dim=-1)
         #'''
         mask = around_predicate.view(-1)
         masked_around_y = y[mask]
         masked_around_pred = pred[mask]
         masked_around_logits = logits[mask]
-        flat_preds = torch.argmax(masked_around_pred,dim=1)
-        flat_preds = flat_preds.view(masked_around_pred.size(0),1)
+        masked_flat_preds = torch.argmax(masked_around_pred,dim=1)
+        masked_flat_preds = masked_flat_preds.view(masked_around_pred.size(0),1)
+        flat_preds = torch.argmax(pred,dim=1)
+        flat_preds = flat_preds.view(pred.size(0),1)
         result = {'logits': masked_around_logits, 'pred': masked_around_pred, "labels":masked_around_y,
-                  "flat_pred":flat_preds, "mask":mask,
+                  "flat_pred":flat_preds, "masked_flat_pred":masked_flat_preds, "mask":mask,
                   "predicate_position":predicate_position}
 
         # compute loss
@@ -358,7 +357,7 @@ class CD_Model(pl.LightningModule):                                 #TODO this i
             batch_idx: int
     ) -> torch.Tensor:
         forward_output = self.forward(*batch)
-        self.f1(forward_output['flat_pred'], forward_output["labels"])
+        self.f1(forward_output['masked_flat_pred'], forward_output["labels"])
         self.log('train_f1', self.f1, prog_bar=True)
         self.log('train_loss', forward_output['loss'],prog_bar=True)
         return forward_output['loss']
@@ -369,7 +368,7 @@ class CD_Model(pl.LightningModule):                                 #TODO this i
             batch_idx: int
     ):
         forward_output = self.forward(*batch)
-        self.f1(forward_output['flat_pred'], forward_output["labels"])
+        self.f1(forward_output['masked_flat_pred'], forward_output["labels"])
         self.log('val_f1', self.f1, prog_bar=True)
         self.log('val_loss', forward_output['loss'],prog_bar=True)
 
@@ -379,7 +378,7 @@ class CD_Model(pl.LightningModule):                                 #TODO this i
             batch_idx: int
     ):
         forward_output = self.forward(*batch)
-        self.f1(forward_output['flat_pred'], forward_output["labels"])
+        self.f1(forward_output['masked_flat_pred'], forward_output["labels"])
         self.log('test_f1', self.f1)
 
     def loss(self, pred, y):
@@ -400,10 +399,87 @@ class CD_Model(pl.LightningModule):                                 #TODO this i
             output = self.forward(X,X_len,segment_ids,y,predicate_position,attention_mask,around_predicate, ids)
             preds = output["flat_pred"].view(X.size(0),-1)
             n_values = X.size(0)*X.size(1)
+
             reconstructed = torch.tensor([28]*n_values,dtype=torch.long, device=device).view(X.size(0),X.size(1))
             for idx in range(len(around_predicate)):
-                reconstructed[idx][around_predicate[idx]] = preds[idx]
+                reconstructed[idx][around_predicate[idx]] = preds[idx][around_predicate[idx]]
 
             out = sentences.convert_output(reconstructed.tolist(),predicate_position.tolist())
         return out
 
+'''
+early_stopping = pl.callbacks.EarlyStopping(
+    monitor='val_f1',  # the value that will be evaluated to activate the early stopping of the model.
+    patience=2,  # the number of consecutive attempts that the model has to raise (or lower depending on the metric used) to raise the "monitor" value.
+    verbose=True,  # whether to log or not information in the console.
+    mode='max', # wheter we want to maximize (max) or minimize the "monitor" value.
+)
+
+check_point_callback = pl.callbacks.ModelCheckpoint(
+    monitor='val_f1',  # the value that we want to use for model selection.
+    verbose=True,  # whether to log or not information in the console.
+    save_top_k=1,  # the number of checkpoints we want to store.
+    mode='max',  # wheter we want to maximize (max) or minimize the "monitor" value.
+    filename='model_CD{epoch}-{val_f1:.4f}'  # the prefix on the checkpoint values. Metrics store by the trainer can be used to dynamically change the name.
+)
+
+
+
+cd_classifier = CD_Model(language="en",p=0.5)
+# the PyTorch Lightning Trainer
+trainer = pl.Trainer(
+    max_epochs=20,  # maximum number of epochs.
+    gpus=1,  # the number of gpus we have at our disposal.
+    callbacks=[early_stopping, check_point_callback]  # the callback we want our trainer to use.
+)
+EN_TRAIN_PATH = "./../../data/EN/train.json"
+EN_DEV_PATH = "./../../data/EN/dev.json"
+
+cd_dm = SentencesDataModule(
+    data_train_path=EN_TRAIN_PATH,
+    data_dev_path=EN_DEV_PATH,
+    data_test_path=EN_DEV_PATH,
+    batch_size=16
+)
+
+# and finally we can let the "trainer" fit the amazon reviews classifier.
+trainer.fit(model=cd_classifier, datamodule=cd_dm)
+model_path = "../../model/modelCD.ckpt"
+classifier = CD_Model.load_from_checkpoint(model_path,language="en").to(device)
+
+def read_dataset(path: str):
+    with open(path) as f:
+        dataset = json.load(f)
+
+    sentences, labels = {}, {}
+    for sentence_id, sentence in dataset.items():
+        sentence_id = sentence_id
+        sentences[sentence_id] = {
+            "words": sentence["words"],
+            "lemmas": sentence["lemmas"],
+            "pos_tags": sentence["pos_tags"],
+            "dependency_heads": [int(head) for head in sentence["dependency_heads"]],
+            "dependency_relations": sentence["dependency_relations"],
+            "predicates": sentence["predicates"],
+        }
+
+        labels[sentence_id] = {
+            "predicates": sentence["predicates"],
+            "roles": {int(p): r for p, r in sentence["roles"].items()}
+            if "roles" in sentence
+            else dict(),
+        }
+
+    return sentences, labels
+EN_TRAIN_PATH = "./../../data/EN/train.json"
+EN_DEV_PATH = "./../../data/EN/dev.json"
+sentences,labels = read_dataset(EN_DEV_PATH)
+
+
+for idx,key in enumerate(sentences):
+    prediction = cd_classifier.predict(sentences[key])["roles"]
+    lab = labels[key]["roles"]
+    print("PREDICTED",prediction)
+    print("GROUND TRUTH",lab)
+
+#'''

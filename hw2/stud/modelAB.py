@@ -52,7 +52,8 @@ print(device)
 UNK_TOKEN = '<unk>'
 # PAD_TOKEN = '_' #???????????????
 PAD_TOKEN = '<pad>'
-
+BERT_PATH = "./model/bert-base-cased"
+#BERT_PATH = "../../model/bert-base-cased"
 print(torch.version.cuda)
 
 SEMANTIC_ROLES = ["AGENT", "ASSET", "ATTRIBUTE", "BENEFICIARY", "CAUSE", "CO_AGENT", "CO_PATIENT", "CO_THEME",
@@ -132,8 +133,8 @@ class PredicateDataset(Dataset):
 
 
     def bert_preprocess(self, sentences):  # TODO tokenize with bert
-        # tokenizer = BertTokenizer.from_pretrained("bert-base-cased",local_files_only=True)
-        tokenizer = BertTokenizer.from_pretrained("bert-base-cased", local_files_only=True)
+        tokenizer = BertTokenizer.from_pretrained(BERT_PATH,local_files_only=True)
+        #tokenizer = BertTokenizer.from_pretrained("bert-base-cased", local_files_only=True)
         for sentence in sentences:
             text = "[CLS] " + " ".join(sentence["words"]) + " [SEP]"
             non_joined_text = ["[CLS]"] + sentence["words"] + ["[SEP]"]
@@ -279,9 +280,10 @@ class AB_Model(
         self.language = language
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=self.num_classes - 1)
         self.f1 = torchmetrics.classification.F1Score(num_classes=self.num_classes, ignore_index=self.num_classes - 1).to(device)
-        self.bert = BertModel.from_pretrained("bert-base-cased", output_hidden_states=True,
+        self.bert = BertModel.from_pretrained(BERT_PATH,local_files_only=True, output_hidden_states=True,
                                               is_decoder=True,
                                               add_cross_attention=True)
+
         self.bert.eval()
 
     # forward method, automatically called when calling the instance
