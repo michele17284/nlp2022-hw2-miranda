@@ -45,15 +45,13 @@ EMBEDDING_DIM = 100
 POS_EMBEDDING_DIM = 10
 
 # specify the device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = torch.device("cpu")
 print(device)
 # setting unknown token to handle out of vocabulary words and padding token to pad sentences
 UNK_TOKEN = '<unk>'
-# PAD_TOKEN = '_' #???????????????
 PAD_TOKEN = '<pad>'
 BERT_PATH = "./model/bert-base-cased"
-#BERT_PATH = "../../model/bert-base-cased"
 print(torch.version.cuda)
 
 SEMANTIC_ROLES = ["AGENT", "ASSET", "ATTRIBUTE", "BENEFICIARY", "CAUSE", "CO_AGENT", "CO_PATIENT", "CO_THEME",
@@ -62,14 +60,12 @@ SEMANTIC_ROLES = ["AGENT", "ASSET", "ATTRIBUTE", "BENEFICIARY", "CAUSE", "CO_AGE
                   "PURPOSE",
                   "RECIPIENT", "RESULT", "SOURCE", "STIMULUS", "THEME", "TIME", "TOPIC", "VALUE", "_"]
 
-torch.set_printoptions(threshold=10_000)
 
-#VERBATLAS_PATH = "./VerbAtlas/VerbAtlas"
 VERBATLAS_PATH = "./hw2/stud/VerbAtlas/VerbAtlas"
 
 import csv
 
-
+#utility function to scrape VerbAtlas and extract 2 dictiories that encode the relations id->frame and frame->id
 def readVerbAtlas(verbAtlasPath):
     frame_info = os.path.join(verbAtlasPath, "VA_frame_info.tsv")
     frame_info = open(frame_info)
@@ -87,7 +83,7 @@ def readVerbAtlas(verbAtlasPath):
 
 
 
-
+#Dataset for predicate identification and disambiguation
 class PredicateDataset(Dataset):
 
     def __init__(self, verbAtlas_path, sentences_path=None, sentences=None,
@@ -262,11 +258,8 @@ class AB_Model(
                  hidden1=768,  # dimension of the first hidden layer
                  hidden2=768,
                  p=0.0,  # probability of dropout layer
-                 bidirectional=False,  # flag to decide if the LSTM must be bidirectional
-                 lstm_layers=1,  # layers of the LSTM
                  ):  # loss function
         super().__init__()
-        hidden1 = hidden1 * 2 if bidirectional else hidden1  # computing the dimension of the linear layer based on if the LSTM is bidirectional or not
         self.num_classes = 434
         self.hidden1 = hidden1
         self.classifier = nn.Sequential(
@@ -275,7 +268,6 @@ class AB_Model(
             nn.Dropout(p),
             nn.Linear(hidden2, self.num_classes)
         )
-        print("NUM_CLASSES ", self.num_classes)
         # load the specific model for the input language
         self.language = language
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=self.num_classes - 1)

@@ -53,7 +53,7 @@ def build_model_34(language: str, device: str) -> Model:
             4: Argument classification.
     """
 
-    loaded = modelCD.CD_Model.load_from_checkpoint(MODEL_CD_PATH, language=language)#,hidden2=200)
+    loaded = modelCD.CD_Model.load_from_checkpoint(MODEL_CD_PATH, language=language).to(device)#,hidden2=200)
     return loaded
 
 

@@ -41,8 +41,8 @@ EMBEDDING_DIM = 100
 POS_EMBEDDING_DIM = 10
 
 # specify the device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#device = torch.device("cpu")
+#device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
 print(device)
 # setting unknown token to handle out of vocabulary words and padding token to pad sentences
 UNK_TOKEN = '<unk>'
@@ -118,11 +118,11 @@ class SentenceDataset(Dataset):
                     instance["attention_mask"] = attention_mask
 
 
-                    instance["around_predicate"] = [1]*len(roles)
+                    instance["around_predicate"] = [0]*len(roles)
                     #'''
                     around_number = 10
-                    start = max(0, int(position) - 10)
-                    stop = min(len(roles), int(position) + 10)
+                    start = max(0, int(position) - 5)
+                    stop = min(len(roles), int(position) + 5)
                     for i in range(start, stop): instance["around_predicate"][i] = 1
                     count = instance["around_predicate"].count(1)
                     #'''
@@ -290,7 +290,7 @@ class CD_Model(pl.LightningModule):                                 #TODO this i
     # REMINDER: EN is mandatory the others are extras
     def __init__(self, language: str,  # pos embedding vectors
                  hidden1=768,  # dimension of the first hidden layer
-                 hidden2=200,
+                 hidden2=768,
                  p=0.0,
                  num_classes=29):  # loss function
         super().__init__()
@@ -338,15 +338,16 @@ class CD_Model(pl.LightningModule):                                 #TODO this i
         masked_around_logits = logits[mask]
         masked_flat_preds = torch.argmax(masked_around_pred,dim=1)
         masked_flat_preds = masked_flat_preds.view(masked_around_pred.size(0),1)
+        #'''
         flat_preds = torch.argmax(pred,dim=1)
         flat_preds = flat_preds.view(pred.size(0),1)
-        result = {'logits': masked_around_logits, 'pred': masked_around_pred, "labels":masked_around_y,
+        result = {'logits': logits, 'pred': pred, "labels":y,
                   "flat_pred":flat_preds, "masked_flat_pred":masked_flat_preds, "mask":mask,
                   "predicate_position":predicate_position}
 
         # compute loss
         if y is not None:
-            loss = self.loss_fn(masked_around_logits, masked_around_y)
+            loss = self.loss_fn(logits, y)
             result['loss'] = loss
 
         return result
@@ -357,7 +358,7 @@ class CD_Model(pl.LightningModule):                                 #TODO this i
             batch_idx: int
     ) -> torch.Tensor:
         forward_output = self.forward(*batch)
-        self.f1(forward_output['masked_flat_pred'], forward_output["labels"])
+        self.f1(forward_output['flat_pred'], forward_output["labels"])
         self.log('train_f1', self.f1, prog_bar=True)
         self.log('train_loss', forward_output['loss'],prog_bar=True)
         return forward_output['loss']
@@ -368,7 +369,7 @@ class CD_Model(pl.LightningModule):                                 #TODO this i
             batch_idx: int
     ):
         forward_output = self.forward(*batch)
-        self.f1(forward_output['masked_flat_pred'], forward_output["labels"])
+        self.f1(forward_output['flat_pred'], forward_output["labels"])
         self.log('val_f1', self.f1, prog_bar=True)
         self.log('val_loss', forward_output['loss'],prog_bar=True)
 
@@ -378,14 +379,14 @@ class CD_Model(pl.LightningModule):                                 #TODO this i
             batch_idx: int
     ):
         forward_output = self.forward(*batch)
-        self.f1(forward_output['masked_flat_pred'], forward_output["labels"])
+        self.f1(forward_output['flat_pred'], forward_output["labels"])
         self.log('test_f1', self.f1)
 
     def loss(self, pred, y):
         return self.loss_fn(pred, y)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.0001,weight_decay=0.0000)  # instantiating the optimizer
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.00001,weight_decay=0.0000)  # instantiating the optimizer
         return optimizer
 
     def predict(self, sentence, predicates=None):
@@ -399,12 +400,12 @@ class CD_Model(pl.LightningModule):                                 #TODO this i
             output = self.forward(X,X_len,segment_ids,y,predicate_position,attention_mask,around_predicate, ids)
             preds = output["flat_pred"].view(X.size(0),-1)
             n_values = X.size(0)*X.size(1)
-
+            '''
             reconstructed = torch.tensor([28]*n_values,dtype=torch.long, device=device).view(X.size(0),X.size(1))
             for idx in range(len(around_predicate)):
                 reconstructed[idx][around_predicate[idx]] = preds[idx][around_predicate[idx]]
-
-            out = sentences.convert_output(reconstructed.tolist(),predicate_position.tolist())
+            '''
+            out = sentences.convert_output(preds.tolist(),predicate_position.tolist())
         return out
 
 '''
